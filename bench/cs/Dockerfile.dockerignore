@@ -1,0 +1,10 @@
+**/target/
+**/build/
+**/bin/
+**/obj/
+**/dist/
+**/node_modules/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.git/

@@ -1,0 +1,6 @@
+{"language":"ts","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":12060,"throughput_eps":16583.74792703151,"drained":true}
+{"language":"ts","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":11798,"throughput_eps":16952.025767079165,"drained":true}
+{"language":"ts","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":11896,"throughput_eps":16812.373907195695,"drained":true}
+{"language":"ts","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":11817,"throughput_eps":16924.769400016925,"drained":true}
+{"language":"ts","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":12107,"throughput_eps":16519.368960105723,"drained":true}
+{"language":"ts","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":11977,"throughput_eps":16698.672455539785,"drained":true}

@@ -1,0 +1,30 @@
+# The free-threaded variant (Python 3.14t / PEP 703, --disable-gil) — the
+# whole reason seda-bus-python exists. No official free-threaded Docker Hub
+# image tag exists yet (checked: python:3.14t-slim and similar don't
+# resolve), so this builds CPython from source with --disable-gil. Only the
+# stdlib bench.py needs (json/os/sys/threading/time), so no optional-module
+# build dependencies (OpenSSL, etc.) are required.
+#
+# Build context is the monorepo root — see ../../scripts/build_and_run.sh.
+FROM debian:12-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates \
+    zlib1g-dev libffi-dev libbz2-dev liblzma-dev libreadline-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl -sSL https://www.python.org/ftp/python/3.14.0/Python-3.14.0.tgz -o python.tgz \
+    && tar -xzf python.tgz
+WORKDIR /build/Python-3.14.0
+RUN ./configure --disable-gil --prefix=/opt/python3.14t --without-ensurepip \
+    && make -j"$(nproc)" \
+    && make install
+
+FROM debian:12-slim AS run
+COPY --from=build /opt/python3.14t /opt/python3.14t
+ENV PATH="/opt/python3.14t/bin:${PATH}"
+WORKDIR /src
+COPY common/ra-common-python/ common/ra-common-python/
+COPY seda-bus/seda-bus-python/ seda-bus/seda-bus-python/
+COPY seda-bus/seda-bus-compare/bench/python/ seda-bus/seda-bus-compare/bench/python/
+WORKDIR /src/seda-bus/seda-bus-compare/bench/python
+ENTRYPOINT ["python3.14", "bench.py"]

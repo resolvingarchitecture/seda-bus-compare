@@ -1,0 +1,12 @@
+[package]
+name = "seda-bus-compare-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+seda_bus = { path = "../../../seda-bus-rust" }

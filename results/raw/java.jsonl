@@ -1,0 +1,6 @@
+{"language":"java","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":863,"throughput_eps":231570.257853,"drained":true}
+{"language":"java","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":598,"throughput_eps":334375.360086,"drained":true}
+{"language":"java","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":461,"throughput_eps":433537.960794,"drained":true}
+{"language":"java","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":414,"throughput_eps":481967.060260,"drained":true}
+{"language":"java","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":395,"throughput_eps":505360.841273,"drained":true}
+{"language":"java","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":379,"throughput_eps":526968.818941,"drained":true}

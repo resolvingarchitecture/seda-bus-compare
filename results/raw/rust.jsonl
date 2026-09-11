@@ -1,0 +1,6 @@
+{"language":"rust","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":302,"throughput_eps":661124.5608455313,"drained":true}
+{"language":"rust","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":330,"throughput_eps":604899.5673301596,"drained":true}
+{"language":"rust","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":302,"throughput_eps":661900.1362471789,"drained":true}
+{"language":"rust","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":317,"throughput_eps":629197.5063367581,"drained":true}
+{"language":"rust","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":330,"throughput_eps":605459.1942693142,"drained":true}
+{"language":"rust","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":326,"throughput_eps":612638.6520734179,"drained":true}
