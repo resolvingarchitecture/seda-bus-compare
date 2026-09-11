@@ -244,11 +244,25 @@ reduces that overhead even on one thread.
 
 ## Known limitations (by design, not oversight)
 
-- **No latency percentiles**, only aggregate throughput. A slow-tail
-  envelope is invisible here.
+- **Latency percentiles (`p50`/`p99`/`p999`/`max`) measure queueing delay,
+  not pure per-envelope dispatch cost**, because `Capacity` is deliberately
+  large enough that back-pressure never engages (see `bench/WORKLOAD.md`'s
+  "Latency" section). Whenever a producer outruns its consumer(s), a
+  backlog forms and these numbers reflect time spent waiting behind that
+  backlog, not the cost of handling any single envelope. This is
+  informative, not a flaw — see `RESULTS.md`'s "Latency" section for what
+  it actually revealed (TS/Python's multi-second `seq`/`par` backlogs,
+  invisible in the throughput numbers alone) — but it means these numbers
+  answer "does this implementation's consumer keep pace with its producer
+  at this concurrency," not "how long does dispatch take."
 - **No multi-stage/routing-slip itineraries, no back-pressure, no
   retry/dead-letter path.** Those are covered functionally (not for
   performance) by each port's own test suite.
+- **An intermittent, unresolved `seda-bus-go` `chan`-shutdown flake was
+  found while collecting latency data** (two non-drained runs out of five
+  attempts, on an otherwise-quiet host — not the contamination pattern
+  documented above). Flagged in `RESULTS.md`, not root-caused or fixed;
+  out of scope for this pass.
 - **Three trials, single machine.** Enough to see real, order-of-magnitude
   effects (this document exists because that's exactly what it took to
   catch a contaminated run and three real bugs), not enough for statistical

@@ -3,6 +3,8 @@
 
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Ra.SedaBus;
 using static Ra.SedaBus.EnvelopeHelpers;
 
@@ -11,16 +13,38 @@ const int Trials = 3;
 
 var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
+// now_ticks: Stopwatch.GetTimestamp() has an arbitrary per-process origin -
+// only ever diffed within this process. See ../WORKLOAD.md's "Latency"
+// section.
+double TicksToUs(long deltaTicks) => deltaTicks * 1_000_000.0 / Stopwatch.Frequency;
+
+// Sorts (consumes) `samples`, computed AFTER the timed window closes so it
+// never counts against throughput.
+LatencyStats ComputeLatencyStats(double[] samples)
+{
+    Array.Sort(samples);
+    int n = samples.Length;
+    return new LatencyStats(
+        samples[(int)(0.50 * (n - 1))],
+        samples[(int)(0.99 * (n - 1))],
+        samples[(int)(0.999 * (n - 1))],
+        samples[n - 1]);
+}
+
 // producers threads, all publishing to ONE channel with concurrency=producers
 // - the "seq"/"par" configs.
 Result RunShared(string config, int producers)
 {
     var bus = new Bus(producers);
     long count = 0;
+    var latencies = new double[Total];
     bus.Channel("bench", new ChannelConfig().WithCapacity(Total).WithConcurrency(producers));
-    bus.Subscribe("bench", _ =>
+    bus.Subscribe("bench", env =>
     {
-        Interlocked.Increment(ref count);
+        long t1 = Stopwatch.GetTimestamp();
+        long t0 = EnvelopePayload(env)!.GetValue<long>();
+        long idx = Interlocked.Increment(ref count) - 1;
+        latencies[idx] = TicksToUs(t1 - t0);
         return true;
     });
 
@@ -35,7 +59,7 @@ Result RunShared(string config, int producers)
         int n = perProducer + (p == 0 ? remainder : 0);
         var t = new Thread(() =>
         {
-            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope("bench", i), timeout);
+            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope("bench", Stopwatch.GetTimestamp()), timeout);
         });
         threads.Add(t);
         t.Start();
@@ -43,9 +67,12 @@ Result RunShared(string config, int producers)
     foreach (var t in threads) t.Join();
     bool drained = bus.Shutdown(TimeSpan.FromSeconds(60));
     sw.Stop();
+    long delivered = Interlocked.Read(ref count);
+    var stats = ComputeLatencyStats(latencies[..(int)delivered]);
 
-    return new Result("cs", config, 0, producers, producers, 1, Total, Interlocked.Read(ref count),
-        sw.ElapsedMilliseconds, Total / sw.Elapsed.TotalSeconds, drained);
+    return new Result("cs", config, 0, producers, producers, 1, Total, delivered,
+        sw.ElapsedMilliseconds, Total / sw.Elapsed.TotalSeconds,
+        stats.P50Us, stats.P99Us, stats.P999Us, stats.MaxUs, drained);
 }
 
 // producers threads, each with its OWN channel and OWN dedicated counter -
@@ -54,6 +81,7 @@ Result RunIndependentChannels(int producers)
 {
     var bus = new Bus(producers);
     var counts = new long[producers];
+    var latencies = new double[producers][]; // one array per channel, never shared
     int perChannel = Total / producers;
     int remainder = Total - perChannel * producers;
 
@@ -61,11 +89,15 @@ Result RunIndependentChannels(int producers)
     {
         string name = $"bench{c}";
         int n = perChannel + (c == 0 ? remainder : 0);
+        latencies[c] = new double[n];
         bus.Channel(name, new ChannelConfig().WithCapacity(n).WithConcurrency(1));
         int idx = c;
-        bus.Subscribe(name, _ =>
+        bus.Subscribe(name, env =>
         {
-            counts[idx]++; // safe: concurrency=1, only this channel's own drain touches it
+            long t1 = Stopwatch.GetTimestamp();
+            long t0 = EnvelopePayload(env)!.GetValue<long>();
+            latencies[idx][counts[idx]] = TicksToUs(t1 - t0); // safe: concurrency=1
+            counts[idx]++; // only this channel's own drain touches it
             return true;
         });
     }
@@ -79,7 +111,7 @@ Result RunIndependentChannels(int producers)
         int n = perChannel + (c == 0 ? remainder : 0);
         var t = new Thread(() =>
         {
-            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope(name, i), timeout);
+            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope(name, Stopwatch.GetTimestamp()), timeout);
         });
         threads.Add(t);
         t.Start();
@@ -89,9 +121,18 @@ Result RunIndependentChannels(int producers)
     sw.Stop();
 
     long delivered = counts.Sum();
+    var allLatencies = new double[delivered];
+    long pos = 0;
+    for (int c = 0; c < producers; c++)
+    {
+        Array.Copy(latencies[c], 0, allLatencies, pos, counts[c]);
+        pos += counts[c];
+    }
 
+    var stats = ComputeLatencyStats(allLatencies);
     return new Result("cs", "chan", 0, producers, 1, producers, Total, delivered,
-        sw.ElapsedMilliseconds, Total / sw.Elapsed.TotalSeconds, drained);
+        sw.ElapsedMilliseconds, Total / sw.Elapsed.TotalSeconds,
+        stats.P50Us, stats.P99Us, stats.P999Us, stats.MaxUs, drained);
 }
 
 int par = Math.Min(8, Environment.ProcessorCount);
@@ -113,6 +154,8 @@ for (int trial = 1; trial <= Trials; trial++)
     Console.WriteLine(JsonSerializer.Serialize(r, jsonOptions));
 }
 
+record LatencyStats(double P50Us, double P99Us, double P999Us, double MaxUs);
+
 record Result(
     string Language,
     string Config,
@@ -124,4 +167,8 @@ record Result(
     long Delivered,
     long ElapsedMs,
     double ThroughputEps,
+    [property: JsonPropertyName("p50_us")] double P50Us,
+    [property: JsonPropertyName("p99_us")] double P99Us,
+    [property: JsonPropertyName("p999_us")] double P999Us,
+    [property: JsonPropertyName("max_us")] double MaxUs,
     bool Drained);

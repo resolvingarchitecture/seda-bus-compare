@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "seda-bus-python", "src
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "..", "common", "ra-common-python", "src"))
 
 from seda_bus import SEDABus, make_envelope  # noqa: E402
+from seda_bus.envelope import envelope_payload  # noqa: E402
 
 TOTAL = 200_000
 TRIALS = 3
@@ -28,6 +29,25 @@ def _version_fields() -> dict:
     }
 
 
+def _now_ns() -> int:
+    """Monotonic nanoseconds, arbitrary per-process origin - only ever
+    diffed within this process. See ../WORKLOAD.md's "Latency" section."""
+    return time.perf_counter_ns()
+
+
+def _compute_latency_stats(samples: list[float]) -> dict:
+    """Sorts (consumes) `samples`, computed AFTER the timed window closes so
+    it never counts against throughput."""
+    samples.sort()
+    n = len(samples)
+    return {
+        "p50_us": samples[int(0.50 * (n - 1))],
+        "p99_us": samples[int(0.99 * (n - 1))],
+        "p999_us": samples[int(0.999 * (n - 1))],
+        "max_us": samples[n - 1],
+    }
+
+
 def run_shared(config: str, producers: int) -> dict:
     """producers threads, all publishing to ONE channel with
     concurrency=producers - the "seq"/"par" configs."""
@@ -35,12 +55,17 @@ def run_shared(config: str, producers: int) -> dict:
     bus.start()
     count = {"n": 0}
     lock = threading.Lock()
+    latencies: list[float] = [0.0] * TOTAL
 
     bus.channel("bench", capacity=TOTAL, concurrency=producers)
 
-    def consumer(_env):
+    def consumer(env):
+        t1 = _now_ns()
+        t0 = envelope_payload(env)
         with lock:
+            idx = count["n"]
             count["n"] += 1
+        latencies[idx] = (t1 - t0) / 1000.0
         return True
 
     bus.subscribe("bench", consumer)
@@ -50,7 +75,7 @@ def run_shared(config: str, producers: int) -> dict:
 
     def produce(n):
         for i in range(n):
-            bus.publish(make_envelope("bench", i), timeout=5.0)
+            bus.publish(make_envelope("bench", _now_ns()), timeout=5.0)
 
     start = time.perf_counter()
     threads = []
@@ -63,6 +88,7 @@ def run_shared(config: str, producers: int) -> dict:
         t.join()
     drained = bus.shutdown(timeout=60.0)
     elapsed = time.perf_counter() - start
+    delivered = count["n"]
 
     return {
         "language": "python",
@@ -71,9 +97,10 @@ def run_shared(config: str, producers: int) -> dict:
         "concurrency": producers,
         "channels": 1,
         "total": TOTAL,
-        "delivered": count["n"],
+        "delivered": delivered,
         "elapsed_ms": round(elapsed * 1000),
         "throughput_eps": TOTAL / elapsed,
+        **_compute_latency_stats(latencies[:delivered]),
         "drained": drained,
         **_version_fields(),
     }
@@ -89,18 +116,24 @@ def run_independent_channels(producers: int) -> dict:
     bus.start()
     counts = [0] * producers
     locks = [threading.Lock() for _ in range(producers)]  # one per channel, never shared
+    latencies: list[list[float]] = []  # one list per channel, never shared
     per_channel = TOTAL // producers
     remainder = TOTAL - per_channel * producers
 
     for c in range(producers):
         name = f"bench{c}"
         n = per_channel + (remainder if c == 0 else 0)
+        latencies.append([0.0] * n)
         bus.channel(name, capacity=n, concurrency=1)
 
         def make_consumer(idx):
-            def consumer(_env):
+            def consumer(env):
+                t1 = _now_ns()
+                t0 = envelope_payload(env)
                 with locks[idx]:  # uncontended: only this channel's own drain touches it
+                    slot = counts[idx]
                     counts[idx] += 1
+                latencies[idx][slot] = (t1 - t0) / 1000.0
                 return True
 
             return consumer
@@ -109,7 +142,7 @@ def run_independent_channels(producers: int) -> dict:
 
     def produce(name, n):
         for i in range(n):
-            bus.publish(make_envelope(name, i), timeout=5.0)
+            bus.publish(make_envelope(name, _now_ns()), timeout=5.0)
 
     start = time.perf_counter()
     threads = []
@@ -124,6 +157,10 @@ def run_independent_channels(producers: int) -> dict:
     drained = bus.shutdown(timeout=60.0)
     elapsed = time.perf_counter() - start
 
+    all_latencies: list[float] = []
+    for c in range(producers):
+        all_latencies.extend(latencies[c][: counts[c]])
+
     return {
         "language": "python",
         "config": "chan",
@@ -134,6 +171,7 @@ def run_independent_channels(producers: int) -> dict:
         "delivered": sum(counts),
         "elapsed_ms": round(elapsed * 1000),
         "throughput_eps": TOTAL / elapsed,
+        **_compute_latency_stats(all_latencies),
         "drained": drained,
         **_version_fields(),
     }

@@ -86,3 +86,12 @@ added specifically to answer "does parallelism actually work here" — and it
 does, substantially, for every implementation except GIL-bound Python. See
 `RESULTS.md` and `METHODOLOGY.md`'s "Does parallelism work?" section for
 the controlled proof.
+
+Throughput alone also turned out to hide a real finding: adding per-
+envelope latency percentiles (`p50`/`p99`/`p999`/`max`) surfaced that
+TypeScript's and Python's `seq`/`par` configs carry multi-*second* queueing
+delays — the consumer can't keep pace with its producer, so a backlog
+builds for the whole run — while every compiled, natively-multithreaded
+implementation stays in the microseconds-to-low-milliseconds range in the
+same configs. `chan` fixes most of it, most dramatically for free-threaded
+Python (a >1000x drop in `p50`). See `RESULTS.md`'s "Latency" section.

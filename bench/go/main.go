@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,27 @@ import (
 
 const total = 200_000
 const trials = 3
+
+// refT is the arbitrary per-process origin for latency timestamps - only
+// ever diffed within this process. time.Since uses the monotonic reading
+// carried inside a time.Time obtained via time.Now(), so this stays
+// wall-clock-jump-safe. See ../WORKLOAD.md's "Latency" section.
+var refT = time.Now()
+
+func nowNanos() int64 { return int64(time.Since(refT)) }
+
+type latencyStats struct {
+	P50Us, P99Us, P999Us, MaxUs float64
+}
+
+// computeLatencyStats sorts (consumes) samples, computed AFTER the timed
+// window closes so it never counts against throughput.
+func computeLatencyStats(samples []float64) latencyStats {
+	sort.Float64s(samples)
+	n := len(samples)
+	at := func(p float64) float64 { return samples[int(p*float64(n-1))] }
+	return latencyStats{at(0.50), at(0.99), at(0.999), samples[n-1]}
+}
 
 type result struct {
 	Language      string  `json:"language"`
@@ -28,6 +50,10 @@ type result struct {
 	Delivered     int64   `json:"delivered"`
 	ElapsedMs     int64   `json:"elapsed_ms"`
 	ThroughputEPS float64 `json:"throughput_eps"`
+	P50Us         float64 `json:"p50_us"`
+	P99Us         float64 `json:"p99_us"`
+	P999Us        float64 `json:"p999_us"`
+	MaxUs         float64 `json:"max_us"`
 	Drained       bool    `json:"drained"`
 }
 
@@ -36,9 +62,13 @@ type result struct {
 func runShared(config string, producers int) result {
 	bus := sedabus.NewBus(producers)
 	var count atomic.Int64
+	latencies := make([]float64, total)
 	bus.Channel("bench", sedabus.NewChannelConfig().WithCapacity(total).WithConcurrency(producers))
-	bus.Subscribe("bench", func(_ *sedabus.Envelope) bool {
-		count.Add(1)
+	bus.Subscribe("bench", func(env *sedabus.Envelope) bool {
+		t1 := nowNanos()
+		t0 := sedabus.EnvelopePayload(env).(int64)
+		idx := count.Add(1) - 1
+		latencies[idx] = float64(t1-t0) / 1000.0
 		return true
 	})
 
@@ -57,18 +87,22 @@ func runShared(config string, producers int) result {
 		go func(n int) {
 			defer wg.Done()
 			for i := 0; i < n; i++ {
-				bus.Publish(sedabus.MakeEnvelope("bench", i), &timeout)
+				bus.Publish(sedabus.MakeEnvelope("bench", nowNanos()), &timeout)
 			}
 		}(n)
 	}
 	wg.Wait()
 	drained := bus.Shutdown(60 * time.Second)
 	elapsed := time.Since(start)
+	delivered := count.Load()
+	stats := computeLatencyStats(latencies[:delivered])
 
 	return result{
 		Language: "go", Config: config, Producers: producers, Concurrency: producers, Channels: 1,
-		Total: total, Delivered: count.Load(), ElapsedMs: elapsed.Milliseconds(),
-		ThroughputEPS: float64(total) / elapsed.Seconds(), Drained: drained,
+		Total: total, Delivered: delivered, ElapsedMs: elapsed.Milliseconds(),
+		ThroughputEPS: float64(total) / elapsed.Seconds(),
+		P50Us: stats.P50Us, P99Us: stats.P99Us, P999Us: stats.P999Us, MaxUs: stats.MaxUs,
+		Drained: drained,
 	}
 }
 
@@ -78,6 +112,7 @@ func runShared(config string, producers int) result {
 func runIndependentChannels(producers int) result {
 	bus := sedabus.NewBus(producers)
 	counts := make([]int64, producers)
+	latencies := make([][]float64, producers) // one slice per channel, never shared
 	perChannel := total / producers
 	remainder := total - perChannel*producers
 
@@ -87,10 +122,14 @@ func runIndependentChannels(producers int) result {
 		if c == 0 {
 			n += remainder
 		}
+		latencies[c] = make([]float64, n)
 		bus.Channel(name, sedabus.NewChannelConfig().WithCapacity(n).WithConcurrency(1))
 		idx := c
-		bus.Subscribe(name, func(_ *sedabus.Envelope) bool {
-			counts[idx]++ // safe: concurrency=1, only this channel's own drain touches it
+		bus.Subscribe(name, func(env *sedabus.Envelope) bool {
+			t1 := nowNanos()
+			t0 := sedabus.EnvelopePayload(env).(int64)
+			latencies[idx][counts[idx]] = float64(t1-t0) / 1000.0 // safe: concurrency=1
+			counts[idx]++                                        // only this channel's own drain touches it
 			return true
 		})
 	}
@@ -108,7 +147,7 @@ func runIndependentChannels(producers int) result {
 		go func(name string, n int) {
 			defer wg.Done()
 			for i := 0; i < n; i++ {
-				bus.Publish(sedabus.MakeEnvelope(name, i), &timeout)
+				bus.Publish(sedabus.MakeEnvelope(name, nowNanos()), &timeout)
 			}
 		}(name, n)
 	}
@@ -117,14 +156,19 @@ func runIndependentChannels(producers int) result {
 	elapsed := time.Since(start)
 
 	var delivered int64
-	for _, c := range counts {
-		delivered += c
+	var allLatencies []float64
+	for c, cnt := range counts {
+		delivered += cnt
+		allLatencies = append(allLatencies, latencies[c][:cnt]...)
 	}
+	stats := computeLatencyStats(allLatencies)
 
 	return result{
 		Language: "go", Config: "chan", Producers: producers, Concurrency: 1, Channels: producers,
 		Total: total, Delivered: delivered, ElapsedMs: elapsed.Milliseconds(),
-		ThroughputEPS: float64(total) / elapsed.Seconds(), Drained: drained,
+		ThroughputEPS: float64(total) / elapsed.Seconds(),
+		P50Us: stats.P50Us, P99Us: stats.P99Us, P999Us: stats.P999Us, MaxUs: stats.MaxUs,
+		Drained: drained,
 	}
 }
 

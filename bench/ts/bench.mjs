@@ -6,9 +6,27 @@
 // beforehand (`npm run build` in each, already done by the Dockerfile).
 import os from "node:os";
 import { SedaBus, makeEnvelope } from "../../../seda-bus-ts/dist/index.js";
+import { envelopePayload } from "../../../seda-bus-ts/dist/envelope.js";
 
 const TOTAL = 200_000;
 const TRIALS = 3;
+
+// nowUs: performance.now() has an arbitrary per-process origin (process
+// start) - only ever diffed within this process. Already in fractional
+// milliseconds; converted to microseconds at read-back. See
+// ../WORKLOAD.md's "Latency" section.
+function nowUs() {
+  return performance.now() * 1000;
+}
+
+// Sorts (consumes) samples, computed AFTER the timed window closes so it
+// never counts against throughput.
+function computeLatencyStats(samples) {
+  samples.sort((a, b) => a - b);
+  const n = samples.length;
+  const at = (p) => samples[Math.floor(p * (n - 1))];
+  return { p50_us: at(0.5), p99_us: at(0.99), p999_us: at(0.999), max_us: samples[n - 1] };
+}
 
 // producers concurrently-awaited async loops, all publishing to ONE channel
 // with concurrency=producers - the "seq"/"par" configs. Node is
@@ -17,8 +35,12 @@ const TRIALS = 3;
 async function runShared(config, producers) {
   const bus = new SedaBus({ concurrency: producers });
   let count = 0;
+  const latencies = new Array(TOTAL).fill(0);
   bus.channel("bench", { capacity: TOTAL, concurrency: producers });
-  bus.subscribe("bench", () => {
+  bus.subscribe("bench", (env) => {
+    const t1 = nowUs();
+    const t0 = envelopePayload(env);
+    latencies[count] = t1 - t0;
     count++;
     return true;
   });
@@ -33,7 +55,7 @@ async function runShared(config, producers) {
     tasks.push(
       (async () => {
         for (let i = 0; i < n; i++) {
-          await bus.publish(makeEnvelope("bench", i), { timeoutMs: 5000 });
+          await bus.publish(makeEnvelope("bench", nowUs()), { timeoutMs: 5000 });
         }
       })(),
     );
@@ -53,6 +75,7 @@ async function runShared(config, producers) {
     delivered: count,
     elapsed_ms: elapsedMs,
     throughput_eps: TOTAL / (elapsedMs / 1000),
+    ...computeLatencyStats(latencies.slice(0, count)),
     drained,
   };
 }
@@ -64,14 +87,19 @@ async function runShared(config, producers) {
 async function runIndependentChannels(producers) {
   const bus = new SedaBus({ concurrency: producers });
   const counts = new Array(producers).fill(0);
+  const latencies = []; // one array per channel, never shared
   const perChannel = Math.floor(TOTAL / producers);
   const remainder = TOTAL - perChannel * producers;
 
   for (let c = 0; c < producers; c++) {
     const name = `bench${c}`;
     const n = perChannel + (c === 0 ? remainder : 0);
+    latencies.push(new Array(n).fill(0));
     bus.channel(name, { capacity: n, concurrency: 1 });
-    bus.subscribe(name, () => {
+    bus.subscribe(name, (env) => {
+      const t1 = nowUs();
+      const t0 = envelopePayload(env);
+      latencies[c][counts[c]] = t1 - t0;
       counts[c]++; // only this channel's own drain touches it
       return true;
     });
@@ -85,7 +113,7 @@ async function runIndependentChannels(producers) {
     tasks.push(
       (async () => {
         for (let i = 0; i < n; i++) {
-          await bus.publish(makeEnvelope(name, i), { timeoutMs: 5000 });
+          await bus.publish(makeEnvelope(name, nowUs()), { timeoutMs: 5000 });
         }
       })(),
     );
@@ -95,6 +123,7 @@ async function runIndependentChannels(producers) {
   const elapsedMs = Date.now() - start;
 
   const delivered = counts.reduce((a, b) => a + b, 0);
+  const allLatencies = latencies.flatMap((lat, c) => lat.slice(0, counts[c]));
 
   return {
     language: "ts",
@@ -107,6 +136,7 @@ async function runIndependentChannels(producers) {
     delivered,
     elapsed_ms: elapsedMs,
     throughput_eps: TOTAL / (elapsedMs / 1000),
+    ...computeLatencyStats(allLatencies),
     drained,
   };
 }
