@@ -10,16 +10,27 @@ import ra.sedabus.SEDABus;
 
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 
 public class Bench {
     static final int TOTAL = 200_000;
     static final int TRIALS = 3;
 
-    record Result(String language, String config, int producers, int concurrency, int total, long delivered,
-                   long elapsedMs, double throughputEps, boolean drained) {
+    record Result(String language, String config, int producers, int concurrency, int channels, int total,
+                   long delivered, long elapsedMs, double throughputEps, boolean drained) {
     }
 
-    static Result runOnce(String config, int producers) throws InterruptedException {
+    static void print(Result r, int trial) {
+        System.out.printf(
+                "{\"language\":\"%s\",\"config\":\"%s\",\"trial\":%d,\"producers\":%d,\"concurrency\":%d,"
+                        + "\"channels\":%d,\"total\":%d,\"delivered\":%d,\"elapsed_ms\":%d,\"throughput_eps\":%f,\"drained\":%s}%n",
+                r.language(), r.config(), trial, r.producers(), r.concurrency(), r.channels(), r.total(),
+                r.delivered(), r.elapsedMs(), r.throughputEps(), r.drained());
+    }
+
+    // producers threads, all publishing to ONE channel with concurrency=producers
+    // - the "seq"/"par" configs.
+    static Result runShared(String config, int producers) throws InterruptedException {
         SEDABus bus = new SEDABus();
         Properties props = new Properties();
         props.setProperty("ra.sedabus.pool.max", Integer.toString(producers));
@@ -57,7 +68,58 @@ public class Bench {
         long elapsedNs = System.nanoTime() - start;
 
         double elapsedS = elapsedNs / 1e9;
-        return new Result("java", config, producers, producers, TOTAL, count.get(), elapsedNs / 1_000_000,
+        return new Result("java", config, producers, producers, 1, TOTAL, count.get(), elapsedNs / 1_000_000,
+                TOTAL / elapsedS, drained);
+    }
+
+    // producers threads, each with its OWN channel and OWN dedicated counter -
+    // the "chan" config. No shared lock/counter between producers at all.
+    static Result runIndependentChannels(int producers) throws InterruptedException {
+        SEDABus bus = new SEDABus();
+        Properties props = new Properties();
+        props.setProperty("ra.sedabus.pool.max", Integer.toString(producers));
+        bus.start(props);
+
+        AtomicLongArray counts = new AtomicLongArray(producers);
+        int perChannel = TOTAL / producers;
+        int remainder = TOTAL - perChannel * producers;
+
+        for (int c = 0; c < producers; c++) {
+            String name = "bench" + c;
+            int n = perChannel + (c == 0 ? remainder : 0);
+            bus.registerChannel(name, n, ServiceLevel.AtMostOnce, null, false, 1);
+            int idx = c;
+            bus.registerAsynchConsumer(name, envelope -> {
+                counts.incrementAndGet(idx); // safe: concurrency=1, only this channel's own drain touches it
+                return true;
+            });
+        }
+
+        long start = System.nanoTime();
+        Thread[] threads = new Thread[producers];
+        for (int c = 0; c < producers; c++) {
+            String name = "bench" + c;
+            int n = perChannel + (c == 0 ? remainder : 0);
+            threads[c] = new Thread(() -> {
+                for (int i = 0; i < n; i++) {
+                    Envelope e = Envelope.documentFactory();
+                    e.getDynamicRoutingSlip().addRoute(new SimpleRoute(name, "RECEIVE"));
+                    while (!bus.publish(e)) {
+                        // capacity == n, so this should never actually spin.
+                    }
+                }
+            });
+            threads[c].start();
+        }
+        for (Thread t : threads) t.join();
+        boolean drained = bus.gracefulShutdown();
+        long elapsedNs = System.nanoTime() - start;
+
+        long delivered = 0;
+        for (int c = 0; c < producers; c++) delivered += counts.get(c);
+
+        double elapsedS = elapsedNs / 1e9;
+        return new Result("java", "chan", producers, 1, producers, TOTAL, delivered, elapsedNs / 1_000_000,
                 TOTAL / elapsedS, drained);
     }
 
@@ -65,18 +127,8 @@ public class Bench {
         int cores = Runtime.getRuntime().availableProcessors();
         int par = Math.max(1, Math.min(8, cores));
 
-        Object[][] configs = {{"seq", 1}, {"par", par}};
-        for (Object[] c : configs) {
-            String name = (String) c[0];
-            int producers = (Integer) c[1];
-            for (int trial = 1; trial <= TRIALS; trial++) {
-                Result r = runOnce(name, producers);
-                System.out.printf(
-                        "{\"language\":\"%s\",\"config\":\"%s\",\"trial\":%d,\"producers\":%d,\"concurrency\":%d,"
-                                + "\"total\":%d,\"delivered\":%d,\"elapsed_ms\":%d,\"throughput_eps\":%f,\"drained\":%s}%n",
-                        r.language(), r.config(), trial, r.producers(), r.concurrency(), r.total(), r.delivered(),
-                        r.elapsedMs(), r.throughputEps(), r.drained());
-            }
-        }
+        for (int trial = 1; trial <= TRIALS; trial++) print(runShared("seq", 1), trial);
+        for (int trial = 1; trial <= TRIALS; trial++) print(runShared("par", par), trial);
+        for (int trial = 1; trial <= TRIALS; trial++) print(runIndependentChannels(par), trial);
     }
 }

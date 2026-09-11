@@ -1,6 +1,9 @@
-{"language":"java","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":863,"throughput_eps":231570.257853,"drained":true}
-{"language":"java","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":598,"throughput_eps":334375.360086,"drained":true}
-{"language":"java","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":461,"throughput_eps":433537.960794,"drained":true}
-{"language":"java","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":414,"throughput_eps":481967.060260,"drained":true}
-{"language":"java","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":395,"throughput_eps":505360.841273,"drained":true}
-{"language":"java","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":379,"throughput_eps":526968.818941,"drained":true}
+{"language":"java","config":"seq","trial":1,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":791,"throughput_eps":252663.025973,"drained":true}
+{"language":"java","config":"seq","trial":2,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":482,"throughput_eps":414746.505267,"drained":true}
+{"language":"java","config":"seq","trial":3,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":573,"throughput_eps":348677.035384,"drained":true}
+{"language":"java","config":"par","trial":1,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":354,"throughput_eps":564148.204994,"drained":true}
+{"language":"java","config":"par","trial":2,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":319,"throughput_eps":625892.840048,"drained":true}
+{"language":"java","config":"par","trial":3,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":321,"throughput_eps":621711.845705,"drained":true}
+{"language":"java","config":"chan","trial":1,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":219,"throughput_eps":913067.930022,"drained":true}
+{"language":"java","config":"chan","trial":2,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":212,"throughput_eps":942466.407729,"drained":true}
+{"language":"java","config":"chan","trial":3,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":194,"throughput_eps":1029005.874852,"drained":true}

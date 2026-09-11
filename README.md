@@ -54,15 +54,31 @@ setup.sh            verifies/clones the sibling repos this depends on
 
 ## What this found
 
-Building this surfaced two real bugs, not just numbers — the first C++ run
-was 20-30x slower than Rust for identical work. Traced to `ra-common-cpp`
-reopening `/dev/urandom` on every random-byte call (fixed, commit
-`8700729`), then, after an isolated micro-benchmark showed envelope
-construction alone was 9x faster than the full bus path, to
-`Envelope::GetRoute()` cloning routes via a JSON serialize/re-parse round
-trip instead of a proper clone (fixed, commit `7e5717b`). A third issue —
-the remaining `par` collapse under Docker specifically — was found,
-confirmed reproducible, and documented as open rather than chased further.
-Rust's own flat `par` was checked with the same rigor and turned out *not*
-to be a bug: see `METHODOLOGY.md` for both investigations in full. That's
-the kind of thing a same-shape cross-language benchmark is for.
+Building this surfaced two real bugs and one real methodology failure —
+not just numbers.
+
+The first full run reported Rust's `par` as flat and explained why with a
+plausible-sounding theory. The theory was wrong, because the number was
+wrong: the host was running concurrent Docker builds during the timed run.
+Caught by direct pushback, confirmed with a clean isolated rerun, and fixed
+by redoing the entire benchmark with nothing else executing concurrently —
+see `METHODOLOGY.md`'s "A contaminated first run" section for the whole
+story, including the exact numbers that didn't add up.
+
+Separately, real: the first C++ run was 20-30x slower than Rust for
+identical work. Traced to `ra-common-cpp` reopening `/dev/urandom` on every
+random-byte call (fixed, commit `8700729`), then, after an isolated
+micro-benchmark showed envelope construction alone was 9x faster than the
+full bus path, to `Envelope::GetRoute()` cloning routes via a JSON
+serialize/re-parse round trip instead of a proper clone (fixed, commit
+`7e5717b`). A third issue — C++'s remaining `chan` gap versus Rust/Go — was
+found, traced to a still-shared mutex, and documented as open.
+
+The biggest structural finding: the benchmark's original `par` config (many
+producers on one shared channel) measures lock contention, not parallel
+capacity, and conflating the two was this report's own methodology gap. A
+third configuration, `chan` (independent channels, one per producer), was
+added specifically to answer "does parallelism actually work here" — and it
+does, substantially, for every implementation except GIL-bound Python. See
+`RESULTS.md` and `METHODOLOGY.md`'s "Does parallelism work?" section for
+the controlled proof.

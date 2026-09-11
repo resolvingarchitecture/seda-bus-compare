@@ -13,28 +13,52 @@ application would see (a real consumer does real work) — it isolates the
 one thing this benchmark can compare fairly across seven very different
 runtimes: the cost of the staging machinery itself.
 
-## The channel
+## The channel(s)
 
-- One channel, name `bench`.
+- `seq`/`par`: one channel, name `bench`. `chan`: `P` channels, named
+  `bench0`..`bench{P-1}`, one per producer.
 - `Delivery: PointToPoint`.
-- `Capacity`: `TOTAL` (the full run's envelope count) — large enough that
-  back-pressure never engages during a run. This benchmark is about
-  scheduling/dispatch throughput, not admission control.
-- One consumer: atomically increments a counter, returns/acks `true`. No
-  I/O, no allocation beyond what the language's atomic-increment requires.
+- `Capacity`: `TOTAL` (`seq`/`par`) or `TOTAL / P` per channel (`chan`) —
+  large enough that back-pressure never engages during a run. This
+  benchmark is about scheduling/dispatch throughput, not admission control.
+- One consumer per channel: increments **that channel's own counter**,
+  returns/acks `true`. No I/O, no allocation beyond what the language's
+  increment requires. `chan`'s counters are independent per channel (an
+  array/slice of them, one per producer) — not one shared counter behind
+  one lock, which would silently reintroduce the exact contention `chan`
+  exists to remove. (An earlier ad-hoc version of this check got this
+  wrong for Python — a single shared counter across "independent" channels
+  — and undermeasured the result; the per-channel counter here is the fix.)
 
-## The two configurations
+## The three configurations
 
-|                             | `seq` | `par`                         |
-|-----------------------------|-------|-------------------------------|
-| Producer threads/goroutines | 1     | `P = min(8, available cores)` |
-| Channel `Concurrency`       | 1     | `P`                           |
+|                             | `seq` | `par`                         | `chan`                        |
+|-----------------------------|-------|-------------------------------|--------------------------------|
+| Producer threads/goroutines | 1     | `P = min(8, available cores)` | `P`                            |
+| Channels                    | 1     | 1 (shared)                    | `P` (one per producer)         |
+| Channel `Concurrency`       | 1     | `P` (all on the one channel)  | 1 each                         |
 
-`par` exists to surface the "True stage parallelism" row of
-`seda-bus/DESIGN.md`'s comparison table as a number, not just a yes/no —
-in particular, Python under the GIL should show little-to-no scaling from
-`seq` to `par`, exactly the effect `seda-bus-python`'s own README already
-describes qualitatively.
+`par` and `chan` isolate two different things:
+
+- **`par`** — `P` producers *and* up to `P` drain workers all sharing
+  **one** channel: one bounded queue behind one lock. This is what "adding
+  threads to a stage" means architecturally — more contenders for the same
+  serialization point. Don't expect linear scaling here even from a
+  correct, well-implemented bus; a single shared lock caps it well below
+  `P`x, sometimes below 1x, once per-item work is small enough (see
+  `METHODOLOGY.md`'s investigation of exactly this, prompted by a user
+  catching that the first-pass numbers didn't hold up).
+- **`chan`** — `P` producers, each with its own dedicated channel and
+  dedicated consumer, no shared queue or lock between them at all. This is
+  the configuration that answers "does more parallelism help," cleanly,
+  because there's no artificial contention point left to hide the answer
+  behind.
+
+Both also surface the "True stage parallelism" row of `seda-bus/DESIGN.md`'s
+comparison table as numbers, not just a yes/no — in particular, Python
+under the GIL should show little-to-no scaling in either configuration,
+exactly the effect `seda-bus-python`'s own README already describes
+qualitatively.
 
 ## Per run
 
@@ -58,10 +82,12 @@ describes qualitatively.
 ## Output contract
 
 Each `bench/<lang>` program prints one JSON line per trial to stdout, and
-nothing else on stdout (logs/warnings go to stderr):
+nothing else on stdout (logs/warnings go to stderr). `channels` is 1 for
+`seq`/`par`, `P` for `chan`:
 
 ```json
-{"language":"go","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"elapsed_ms":812,"throughput_eps":246305,"drained":true}
+{"language":"go","config":"par","trial":1,"producers":8,"concurrency":8,"channels":1,"total":200000,"elapsed_ms":812,"throughput_eps":246305,"drained":true}
+{"language":"go","config":"chan","trial":1,"producers":8,"concurrency":1,"channels":8,"total":200000,"elapsed_ms":110,"throughput_eps":1818181,"drained":true}
 ```
 
 `scripts/aggregate.py` reads these lines (one file per language under

@@ -1,161 +1,263 @@
 # Methodology
 
-How the numbers in `RESULTS.md` were produced, and — more importantly —
-what they don't mean.
+How the numbers in `RESULTS.md` were produced, what went wrong twice along
+the way, and — more importantly — what these numbers don't mean. This
+document is as much a record of getting challenged and checking as it is a
+spec, because the checking is what makes the numbers worth trusting.
 
 ## The workload
 
 See [`bench/WORKLOAD.md`](bench/WORKLOAD.md) for the full specification.
-Short version: one channel, one no-op consumer (an atomic increment), 200,000
-envelopes per trial, three trials per configuration, at `seq` (1 producer,
-concurrency 1) and `par` (P producers, concurrency P, P = min(8, cores)).
-This isolates bus/scheduler overhead from business logic — it is
-**deliberately not** a realistic application workload.
+Short version: 200,000 envelopes per trial, 3 trials per configuration, in
+three configurations:
+
+- **`seq`** — 1 producer, 1 channel, concurrency 1. The baseline.
+- **`par`** — `P = min(8, cores)` producers, all publishing to **one**
+  shared channel with concurrency `P`. Tests what "adding threads to a
+  stage" means architecturally: more contenders for one lock.
+- **`chan`** — `P` producers, each with its **own** dedicated channel and
+  consumer, no shared queue between them. Tests what parallelism can
+  actually achieve once the shared serialization point is removed.
+
+`par` and `chan` exist as two separate configurations, not one, because
+they answer different questions — see "Does parallelism work?" below for
+why that distinction turned out to be the whole point of this report.
 
 ## Reproducing this
 
 ```sh
-./setup.sh              # verifies the 14 sibling repos this depends on are present
-./scripts/build_and_run.sh   # builds all 8 Docker images (7 languages + Python's
-                              # free-threaded variant), runs each, writes
-                              # results/raw/<lang>.jsonl
-python3 scripts/aggregate.py # writes results/summary.csv, prints the RESULTS.md table
+./setup.sh                    # verifies the 14 sibling repos this depends on are present
+./scripts/build_and_run.sh    # builds all 8 Docker images (7 languages + Python's
+                               # free-threaded variant), runs each, writes
+                               # results/raw/<lang>.jsonl
+python3 scripts/aggregate.py  # writes results/summary.csv, prints the RESULTS.md table
 ```
 
 Every benchmark runs inside a Docker container with a pinned base image
 (see each `bench/<lang>/Dockerfile`), not on whatever happens to be
-installed on the machine running this. That matters here specifically
-because none of `ra-common-*`/`seda-bus-*` are published to a package
-registry — they're only resolvable as monorepo-relative source, so
+installed on the machine running this — `ra-common-*`/`seda-bus-*` are only
+resolvable as monorepo-relative source, not a package registry, so
 "reproducible" has to mean "the same toolchain version building the same
-source," not just "the same source."
+source."
 
-All benchmarks in one run were executed on a single shared-tenancy Docker
-host (see `results/raw/*.jsonl` for the exact numbers and `RESULTS.md` for
-the date). Machine noise (other containers, host scheduler pressure,
-thermal throttling) is not controlled for. Treat every number here as
-**directional**, not a benchmark-grade measurement — the *relative*
-comparisons (which implementation is faster than which, how much `par`
-helps) are far more trustworthy than any single absolute throughput figure.
+## A contaminated first run, and how it was caught
 
-## What went wrong, twice, and what it means for reading these numbers
+The first full run reported Rust's `par` as flat (0.96x of `seq`) and
+explained that with a plausible-sounding theory: bus overhead near zero for
+Rust, a single shared mutex, nothing left to parallelize. **That
+explanation was wrong**, and it was wrong because the underlying number was
+wrong — not because the reasoning about mutexes was bad reasoning in the
+abstract.
 
-The first C++ run showed ~15,000 envelopes/sec sequential — 20-30x slower
-than Rust for an *identical* workload on two languages with nearly
-identical bus designs (hand-rolled thread pool, no GC). That gap was
-investigated, not accepted, and it took two separate fixes, not one:
+The user pushed back directly: *"if we push to 1000 threads, you're trying
+to tell me we get lower throughput?"* and *"you're using 8 threads, you
+should get close to 8x throughput otherwise your code is shit."* Rather
+than defend the original number, it got checked: a scaling test at
+1/8/32/128/512/1000 producer threads, run natively, showed throughput
+*increasing* from 1 to 8 threads (261,602 → 732,119 eps) — flatly
+contradicting the "official" report of 0.96x. Something was wrong with the
+measurement, not the theory.
 
-1. `ra-common-cpp`'s random-byte source (`SecureRandomBytes`) was
-   re-opening `/dev/urandom` with a fresh `fopen`/`fread`/`fclose` on
-   *every single call*, and envelope construction calls it twice (once for
-   the envelope id, once for the route's internal id) — 400,000 file-open
-   cycles per trial. Every other language's random source is a single
-   syscall or, for Python's non-cryptographic `random` module, no syscall
-   at all. **Fixed: commit `8700729`** — keep the file handle open for the
-   process, guarded by a mutex. ~136,000 eps, an 8-9x improvement.
-2. That still left C++ ~4.7x behind Rust. Rather than accept "C++ is just
-   slower," an isolated micro-benchmark measured envelope construction
-   *alone*, no bus at all: 200,000 envelopes in a tight loop hit 1.19M eps —
-   nearly 9x faster than the full publish-through-bus number at the time.
-   That gap pointed straight at the bus path itself, and
-   `Envelope::GetRoute()`/`Ratchet()` turned out to clone the current route
-   by serializing it to a JSON tree and immediately re-parsing that tree
-   back, just to get an independently-owned pointer — every other port's
-   `GetRoute()` just copies a reference, since only C++'s `unique_ptr`
-   ownership model needs an independent clone at all. **Fixed: commit
-   `7e5717b`** — a proper virtual `Route::Clone()` instead. ~174,000 eps.
+The actual cause: this machine runs other things. Two unrelated containers
+(`meridian-infra-*`, not part of this project) were running during the
+original benchmark pass, and — more significantly — **this session was
+itself running multiple concurrent Docker builds while the "official"
+timed runs executed**, from building and testing seven other language
+images in parallel to keep the overall task moving. An 8-thread benchmark
+is far more sensitive to competing load than a 1-thread one: it needs 8
+free cores to show its real behavior, and a busy host quietly serializes
+what should be parallel work. A clean, isolated re-run of the *exact same
+binary* — nothing else running — showed real scaling (seq ~625k → par
+~724k, ~1.16x), not the flat result originally reported.
 
-This pattern — isolate the suspicious component with a micro-benchmark,
-don't accept "that's just how it is" — is why both bugs are in this
-document and not a footnote. A 20-30x gap between two structurally similar
-implementations is never "just how the language is." See `RESULTS.md`'s
-C++ section for the full before/after numbers, both fixes.
+**Every number in `RESULTS.md` is from a rerun with nothing else executing
+concurrently on the host**, confirmed via `uptime` and `docker ps` before
+each run. This is why the methodology doc spends this much space on a
+process failure: the failure is more instructive than the fix. A benchmark
+number that can't survive "did anything else touch the CPU while this
+ran?" isn't a number yet.
 
-`par` for C++ still doesn't scale past `seq` even after both fixes — it
-collapses to ~63,000 eps against `seq`'s ~174,000, a 2.8x drop (down from
-6x before the fixes). The remaining cause is the same mutex from fix #1:
-every envelope still calls `SecureRandomBytes` twice, and those two calls,
-from up to 8 producer threads, still serialize through one mutex-guarded
-file handle. This specific bottleneck is confirmed markedly more expensive
-under Docker's virtualization than running natively — a native,
-non-containerized run on the same machine after both fixes showed `par`
-(~157,000 eps) roughly matching `seq` (~156,000-176,000 eps), no collapse
-at all — reproduced twice under Docker, and not a CPU-limiting artifact
-(`nproc` inside the container correctly reports all 12 host cores). This is
-documented, not chased further in this pass — a good next step for
-`ra-common-cpp` would be per-thread random-byte buffering, or calling
-`getrandom()` directly instead of sharing one `FILE*`. It's also a small,
-concrete illustration of this report's bigger caveat: *where* you run a
-benchmark can change not just the numbers but which implementation looks
-best, especially for anything gated on lock contention.
+## C++: two real bugs, found and fixed, one left diagnosed
 
-## Rust's flat `par`: checked with the same rigor, different verdict
+The first (contaminated) C++ run measured ~15,000 eps sequential — 20-30x
+slower than Rust for identical work between two hand-rolled-thread-pool,
+no-GC implementations that should be structurally comparable. Investigated
+rather than accepted, and it took two separate fixes:
 
-Rust's `par`/`seq` ratio (0.96x, effectively flat) looks like the same kind
-of red flag as C++'s collapse. It was checked the same way — isolate
-envelope construction from bus overhead — with the opposite conclusion.
-Envelope construction alone, run at the same 1/2/4/8 thread counts as
-`seq`/`par`, scales close to linearly (698,780 → 1,846,991 eps, 2.6x at 8
-threads): Rust's allocator and runtime are not the bottleneck, and there is
-no hidden bug analogous to C++'s two. What's actually happening: Rust's
-`seq` (642,641 eps) is already within ~8% of bare single-threaded envelope
-construction (698,780 eps) — bus overhead is close to zero, so there's
-almost nothing left for more threads to parallelize — and
-`seda-bus-rust`'s one channel is a single `Mutex<VecDeque<Envelope>>`
-shared by every producer *and* every drain worker. With near-zero
-per-envelope consumer work, 8 producers plus up to 8 drain workers
-contending on that one mutex costs more than the extra parallelism saves —
-a well-known effect (lock contention dominating when there's too little
-work per critical section to amortize it), not a defect. Go/C#/Java's
-`par` *does* scale under the identical single-mutex-per-channel design
-(1.5-1.8x) precisely because their slower sequential baselines leave more
-non-lock overhead for added workers to net a gain against. See
-`RESULTS.md`'s Rust section for the full thread-count table.
+1. **`ra-common-cpp` was re-opening `/dev/urandom`**
+   (`fopen`/`fread`/`fclose`) on *every* random-byte call, and envelope
+   construction calls it twice per envelope — 400,000 file-open cycles per
+   trial. Every other language's random source is a single syscall, or
+   (Python's non-crypto `random`) none at all. **Fixed: commit `8700729`**
+   — keep the file handle open for the process, mutex-guarded.
+2. That still left C++ ~4.7x behind Rust. An isolated micro-benchmark —
+   envelope construction alone, no bus at all — hit 1.19M eps, ~9x faster
+   than the full publish-through-bus number at the time, pointing straight
+   at the bus path. `Envelope::GetRoute()`/`Ratchet()` turned out to clone
+   the current route by **serializing it to a JSON tree and immediately
+   re-parsing that tree back**, just to get an independently-owned
+   pointer — every other port's `GetRoute()` just copies a reference, since
+   only C++'s `unique_ptr` ownership model needs an independent clone at
+   all. **Fixed: commit `7e5717b`** — a proper virtual `Route::Clone()`.
+
+Both fixes are real, verified, and reflected in every C++ number in
+`RESULTS.md`. What's still open: `chan` for C++ shows real improvement
+(1.42x over `seq`) but far less than Rust/Go's 5-6x — because every
+envelope still calls the now-fixed-but-still-shared `SecureRandomBytes`
+twice, and that single mutex-guarded file handle is shared across *all* 8
+producer threads regardless of which channel they publish to. Independent
+channels remove the channel-queue lock; they don't remove this second,
+separate lock. Not fixed in this pass — a good next step would be
+per-thread random-byte buffering, or `getrandom()` directly instead of a
+shared `FILE*`.
+
+## Does parallelism work? Yes — once you check what "parallel" means here
+
+The sharpest challenge, and the one that shaped this report the most:
+*"why are you using a shared mutex? why are you purposely creating a
+bottleneck?"* and *"adding threads does not improve throughput unless
+adding channels equal to those threads."*
+
+The direct answer: a mutex-guarded bounded queue isn't a deliberately
+introduced bottleneck — it's the standard, conventional way to make a
+*single shared stage* (the whole point of SEDA: many producers, one bounded
+admission-controlled queue) safe for concurrent access, and it's what all
+seven ports do, including the original Java. `par` tests exactly that
+architecture: `P` producers **and** up to `P` drain workers all contending
+for the same lock. No implementation of "one shared lock, near-zero work
+per item" scales linearly with thread count — that's textbook lock
+contention, true in any language.
+
+That claim was tested, not just asserted. A controlled comparison —
+1 thread/1 channel, vs. 8 threads sharing 1 channel, vs. 8 threads with 8
+independent channels (no shared lock at all) — settles it:
+
+| | 1 thread, 1 channel | 8 threads, 1 shared channel | 8 threads, 8 independent channels |
+|---|--:|--:|--:|
+| Rust (native) | 244,066 eps | 747,582 eps (3.06x) | 1,939,836 eps (**7.95x**) |
+| Python 3.13, GIL (native) | 30,676 eps | 18,475 eps (0.60x) | 21,115 eps (0.69x) |
+| Python 3.14t, free-threaded (native) | 36,599 eps | 37,982 eps (1.04x) | 124,578 eps (**3.40x**) |
+
+Independent channels get close to the linear scaling a naive "8 threads,
+8x throughput" intuition expects; a shared channel does not, for any
+language, because it's testing a different thing (lock contention, not
+parallel capacity). Neither number is "wrong" — they're answers to two
+different questions, and the mistake in the first draft of this report was
+not making that distinction clear rather than running the comparison at
+all.
+
+This is now a permanent third configuration (`chan`) in the benchmark, not
+a one-off scratch test — see `bench/WORKLOAD.md` and the full seven-language
+`chan` results in `RESULTS.md`.
+
+### Mutex vs. lock-free: the actual tradeoff, not just "mutexes are bad"
+
+A mutex-guarded queue is the right *default*, not a mistake:
+
+- **Correctness is straightforward** — hold the lock, check/mutate state,
+  release. Lock-free structures need careful memory-ordering reasoning
+  (ABA problems, safe reclamation) that's notoriously easy to get subtly
+  wrong.
+- **`Block` back-pressure and `DropOldest` come for free** — a producer
+  sleeping until there's room, or evicting the oldest entry atomically, are
+  natural fits for "hold the lock, do it." Both are materially harder to
+  implement correctly lock-free.
+- **Available everywhere, no dependencies** — every one of the seven
+  languages has a mutex+condvar/monitor in its standard library; a solid
+  lock-free MPMC queue generally isn't stdlib anywhere used here.
+- **Cheap when uncontended** — for any real workload where per-envelope
+  processing takes microseconds or more (the common case), the lock is a
+  small fraction of total time. This benchmark's near-zero-work design is
+  the pathological case built specifically to surface lock cost, not the
+  representative one.
+
+The cons are exactly what `par` measures: one serialization point for the
+whole stage, non-linear (sometimes negative) degradation under contention,
+and — confirmed this session — meaningfully worse behavior under
+virtualization than native. The lowest-risk improvement, if `par`-style
+scaling on a single shared stage matters for a real use case, is a
+**two-lock queue** (separate put/take locks, as Java's
+`LinkedBlockingQueue` does) rather than going fully lock-free — it directly
+targets "producers and consumers both fighting over one lock" with far less
+correctness risk than hand-rolled lock-free code. Not implemented in any
+port here; a scoped follow-up, not a claim about what the current numbers
+already show.
+
+## Python: GIL vs. free-threaded, verified with the same rigor
+
+`seda-bus-python` exists to demonstrate free-threaded CPython's value for
+CPU-bound staged work, and its own README shows a real ~2.6x speedup on an
+actual CPU-bound task (hashcash/fib). This benchmark's consumer does almost
+no CPU work, so `par` (one shared channel) shows only 0.97x for 3.14t —
+not because free-threading doesn't work, but because there's essentially
+nothing to parallelize once bus overhead dominates and the shared lock caps
+what's left. `chan` (independent channels, no shared lock) shows real
+gains — 1.69x in the Docker run, 3.40x in an isolated native check — closer
+to what free-threading should deliver once the artificial contention point
+is removed.
+
+One thing corrected mid-investigation: an earlier ad-hoc verification
+script for `chan` had its own bug — the "independent" channels' consumer
+closures accidentally captured one shared `lock`/`count` instead of one
+each, silently reintroducing exactly the contention `chan` exists to
+remove, and undermeasuring the result. Fixed in `bench/python/bench.py`
+(each channel's consumer now closes over its own counter and its own lock,
+never shared) — the numbers in `RESULTS.md` are from the fixed version.
+
+3.13's GIL cost is real and reproduces in both configurations (`par` 0.29x,
+`chan` 0.28x) — under the GIL, only one thread executes Python bytecode at
+a time, so more threads contending for that single execution slot on
+already lock-heavy bus code makes things slower, not faster, regardless of
+channel topology. This matches `seda-bus-python`'s own documented GIL
+finding.
+
+## TypeScript: `chan` helps even with no real OS threads
+
+`ts`'s `par` is flat (1.01x) — expected: Node runs JavaScript on one
+thread, so `par`'s "8 producers" are concurrently-awaited async tasks on
+that one event loop, not OS-level parallelism (`seda-bus/DESIGN.md`'s "True
+stage parallelism" row: TS only gets real parallelism for
+`worker`-configured stages, not used here). What's more interesting: `chan`
+still shows a real 3.37x gain despite there being no CPU parallelism to
+gain at all. That's not a contradiction — a single heavily-contended
+channel has real per-operation coordination overhead (permit-checking,
+promise/microtask scheduling under concurrent `await`s) beyond just
+"waiting for a lock," and splitting work across independent channels
+reduces that overhead even on one thread.
 
 ## Known limitations (by design, not oversight)
 
-- **Trivial consumer work.** This isolates bus overhead, which is the point
-  — but it means Python 3.14t's free-threading benefit barely shows up
-  here (see `RESULTS.md`), even though `seda-bus-python`'s own README
-  documents a real ~2.6x speedup for actual CPU-bound work (hashcash/fib).
-  There is almost no CPU work in this benchmark's consumer for
-  free-threading to parallelize — that's a property of this workload, not
-  a finding about free-threaded Python's value.
 - **No latency percentiles**, only aggregate throughput. A slow-tail
   envelope is invisible here.
 - **No multi-stage/routing-slip itineraries, no back-pressure, no
   retry/dead-letter path.** Those are covered functionally (not for
   performance) by each port's own test suite.
-- **Single machine, shared tenancy, three trials.** Enough to see real
-  effects (GIL contention making Python slower under `par`, real
-  multi-core scaling in Rust/Go/Java/C#/C++), not enough for statistical
-  rigor. If you need that, increase `TRIALS` in `bench/WORKLOAD.md`'s spec
-  and each `bench/<lang>` program.
+- **Three trials, single machine.** Enough to see real, order-of-magnitude
+  effects (this document exists because that's exactly what it took to
+  catch a contaminated run and two real bugs), not enough for statistical
+  rigor on small differences between structurally similar implementations.
 - **The Java/`common` version-skew workaround.** `seda-bus-java`'s
   `pom.xml` depends on `resolvingarchitecture:common:1.2.0`, but
-  `ra-common-java`'s own `pom.xml` is currently at `1.3.2`. Rather than
-  edit either repo, `bench/java/Dockerfile` installs the built jar into the
-  local Maven repo under both its real version and a `1.2.0` alias. This is
-  a real, observed piece of drift in the ecosystem, not a benchmark
-  artifact — worth fixing at the source at some point, out of scope here.
+  `ra-common-java`'s own `pom.xml` is currently at `1.3.2`.
+  `bench/java/Dockerfile` installs the built jar under both its real
+  version and a `1.2.0` alias rather than editing either repo — a real,
+  observed piece of ecosystem drift, out of scope to fix here.
 - **No official free-threaded Python Docker image exists** (checked:
-  `python:3.14t-slim` and similar tags don't resolve on Docker Hub as of
-  this writing), so `bench/python/Dockerfile.freethreaded` builds CPython
-  3.14.0 from source with `--disable-gil`. This is a real, if slow
-  (multi-minute), reproduction path — not a workaround that skips the
-  variant.
+  `python:3.14t-slim` and similar tags don't resolve on Docker Hub), so
+  `bench/python/Dockerfile.freethreaded` builds CPython 3.14.0 from source
+  with `--disable-gil` — slow (multi-minute) but a real reproduction path,
+  not a workaround that skips the variant.
 
 ## "Other attributes"
 
 `RESULTS.md`'s attributes table pulls most of its columns directly from
 [`seda-bus/DESIGN.md`](../DESIGN.md)'s own comparison table (§2.1) — that
-document is the maintained source of truth for design decisions (worker
-pool model, envelope source, `BATCH` size, dependencies, etc.); this report
-doesn't re-derive it. New columns added here: source lines of code (`wc -l`
-over each port's library source, excluding tests/vendored dependencies/build
-output), integration test count, and whether the *implementation itself*
-(not this benchmark) has been verified under a race detector/sanitizer —
-`seda-bus-go` is the only one with a clean, trustworthy sanitizer run
-(`go test -race`, five repeated runs); `seda-bus-cpp`'s ThreadSanitizer
-attempt could not be trusted in the sandbox it was built in (see that
-port's `DESIGN.md`).
+document is the maintained source of truth for design decisions; this
+report doesn't re-derive it. New columns: source lines of code (`wc -l`
+over each port's library source, excluding tests/vendored
+dependencies/build output — see `scripts/count_loc.sh`), integration test
+count, and whether the *implementation itself* (not this benchmark) has
+been verified under a race detector/sanitizer — `seda-bus-go` is the only
+one with a clean, trustworthy sanitizer run (`go test -race`, five repeated
+runs); `seda-bus-cpp`'s ThreadSanitizer attempt could not be trusted in the
+sandbox it was built in.

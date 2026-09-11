@@ -1,6 +1,9 @@
-{"language":"go","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1205,"throughput_eps":165914.93912222923,"drained":true}
-{"language":"go","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1505,"throughput_eps":132848.49689856815,"drained":true}
-{"language":"go","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1373,"throughput_eps":145568.02117923874,"drained":true}
-{"language":"go","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":738,"throughput_eps":270672.1426871153,"drained":true}
-{"language":"go","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":805,"throughput_eps":248169.84233772397,"drained":true}
-{"language":"go","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":762,"throughput_eps":262154.36678596557,"drained":true}
+{"language":"go","config":"seq","trial":1,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":1172,"throughput_eps":170519.10054656462,"drained":true}
+{"language":"go","config":"seq","trial":2,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":1453,"throughput_eps":137577.36775917409,"drained":true}
+{"language":"go","config":"seq","trial":3,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":1253,"throughput_eps":159556.36297847505,"drained":true}
+{"language":"go","config":"par","trial":1,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":783,"throughput_eps":255241.79546624975,"drained":true}
+{"language":"go","config":"par","trial":2,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":704,"throughput_eps":284012.39701048384,"drained":true}
+{"language":"go","config":"par","trial":3,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":711,"throughput_eps":280920.2291037624,"drained":true}
+{"language":"go","config":"chan","trial":1,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":224,"throughput_eps":890416.4398442088,"drained":true}
+{"language":"go","config":"chan","trial":2,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":195,"throughput_eps":1021024.1012637002,"drained":true}
+{"language":"go","config":"chan","trial":3,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":213,"throughput_eps":934778.8966073686,"drained":true}

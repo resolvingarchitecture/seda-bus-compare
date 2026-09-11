@@ -69,6 +69,7 @@ def main() -> None:
                 "config": config,
                 "trials": len(trials),
                 "producers": trials[0]["producers"],
+                "channels": trials[0].get("channels", 1),
                 "min_eps": round(min(throughputs)),
                 "mean_eps": round(statistics.mean(throughputs)),
                 "max_eps": round(max(throughputs)),
@@ -82,25 +83,30 @@ def main() -> None:
         writer.writerows(summary_rows)
     print(f"wrote {SUMMARY_CSV}", file=sys.stderr)
 
-    # Markdown table, one row per variant, seq and par mean throughput side by side.
+    # Markdown table, one row per variant, seq/par/chan mean throughput side by side.
     by_variant: dict[str, dict[str, dict]] = {}
     for row in summary_rows:
         by_variant.setdefault(row["variant"], {})[row["config"]] = row
 
-    print("| Implementation | seq mean eps | seq range | par mean eps | par range | par producers | par speedup |")
-    print("|---|---|---|---|---|---|---|")
-    for variant, configs in sorted(by_variant.items(), key=lambda kv: -kv[1].get("par", kv[1].get("seq", {})).get("mean_eps", 0)):
+    def rank(kv):
+        configs = kv[1]
+        best = configs.get("chan") or configs.get("par") or configs.get("seq") or {}
+        return -best.get("mean_eps", 0)
+
+    print("| Implementation | seq mean | par mean | par vs seq | chan mean | chan vs seq |")
+    print("|---|--:|--:|--:|--:|--:|")
+    for variant, configs in sorted(by_variant.items(), key=rank):
         seq = configs.get("seq")
         par = configs.get("par")
+        chan = configs.get("chan")
         seq_mean = seq["mean_eps"] if seq else None
         par_mean = par["mean_eps"] if par else None
-        seq_range = f"{seq['min_eps']}-{seq['max_eps']}" if seq else "-"
-        par_range = f"{par['min_eps']}-{par['max_eps']}" if par else "-"
-        par_producers = par["producers"] if par else "-"
-        speedup = f"{par_mean / seq_mean:.2f}x" if seq_mean and par_mean else "-"
+        chan_mean = chan["mean_eps"] if chan else None
+        par_ratio = f"{par_mean / seq_mean:.2f}x" if seq_mean and par_mean else "-"
+        chan_ratio = f"{chan_mean / seq_mean:.2f}x" if seq_mean and chan_mean else "-"
         print(
-            f"| {variant} | {seq_mean or '-'} | {seq_range} | {par_mean or '-'} | {par_range} "
-            f"| {par_producers} | {speedup} |"
+            f"| {variant} | {seq_mean or '-'} | {par_mean or '-'} | {par_ratio} "
+            f"| {chan_mean or '-'} | {chan_ratio} |"
         )
 
 

@@ -1,149 +1,136 @@
 # Results
 
-Read [`METHODOLOGY.md`](METHODOLOGY.md) first — what's measured, and what
-it deliberately doesn't mean. These numbers are directional (single
-shared-tenancy Docker host, three trials), not benchmark-grade.
+Read [`METHODOLOGY.md`](METHODOLOGY.md) first. It's not optional this time:
+the first pass at these numbers was contaminated by concurrent load on the
+host and reported a wrong conclusion (Rust's `par` looking flat) with a
+plausible-sounding but incorrect explanation attached. That was caught by
+direct, specific pushback, verified with a clean rerun, and led to finding
+two real bugs in `ra-common-cpp` and a genuine gap in how this benchmark's
+`par` configuration was being interpreted. Everything below reflects that —
+this is the corrected report, not the first draft.
 
-**Run date:** 2026-09-11. Raw data: [`results/raw/*.jsonl`](results/raw/),
-[`results/summary.csv`](results/summary.csv). Regenerate with
-`./scripts/build_and_run.sh && python3 scripts/aggregate.py`.
+**Run date:** 2026-09-11 (corrected run). Raw data:
+[`results/raw/*.jsonl`](results/raw/), [`results/summary.csv`](results/summary.csv).
+Regenerate with `./scripts/build_and_run.sh && python3 scripts/aggregate.py`
+— on a quiet host; see `METHODOLOGY.md` for why that matters.
 
-## Throughput
+## Throughput: three configurations, not two
 
-200,000 envelopes/trial, 3 trials/configuration, `seq` = 1 producer/
-concurrency 1, `par` = 8 producers/concurrency 8. All numbers envelopes/sec.
+200,000 envelopes/trial, 3 trials/configuration. All numbers envelopes/sec,
+mean of 3 trials (see `results/summary.csv` for min/max ranges).
 
-| Implementation | seq mean | seq range | par mean | par range | par vs. seq |
-|---|--:|---|--:|---|--:|
-| Rust | 642,641 | 604,900–661,900 | 615,765 | 605,459–629,198 | 0.96x |
-| Java | 333,161 | 231,570–433,538 | 504,766 | 481,967–526,969 | 1.52x |
-| C++ | 173,945 | 163,628–182,018 | 62,655 | 58,638–68,326 | **0.36x** |
-| C# | 174,228 | 151,264–189,305 | 270,530 | 260,592–283,496 | 1.55x |
-| Go | 148,110 | 132,848–165,915 | 260,332 | 248,170–270,672 | 1.76x |
-| Python 3.14t (free-threaded) | 33,795 | 33,390–34,200 | 35,446 | 35,248–35,616 | 1.05x |
-| TypeScript (Node 22) | 16,783 | 16,584–16,952 | 16,714 | 16,519–16,925 | 1.00x |
-| Python 3.13 (GIL) | 41,669 | 39,602–43,556 | 11,344 | 11,025–11,866 | **0.27x** |
+- **`seq`** — 1 producer, 1 channel. Baseline.
+- **`par`** — 8 producers, **1 shared channel**. Tests lock contention on a
+  single stage.
+- **`chan`** — 8 producers, **8 independent channels** (1:1). Tests actual
+  parallel capacity with the artificial shared-lock contention point
+  removed.
 
-Three results are bolded or called out below because they're the
-interesting ones — every one of them was checked, not just reported:
+| Implementation | seq | par | par vs. seq | chan | chan vs. seq |
+|---|--:|--:|--:|--:|--:|
+| Rust | 584,735 | 724,560 | 1.24x | **3,179,877** | **5.44x** |
+| Java | 338,696 | 603,918 | 1.78x | 961,513 | 2.84x |
+| Go | 155,884 | 273,391 | 1.75x | **948,740** | **6.09x** |
+| C# | 179,103 | 321,402 | 1.79x | 475,127 | 2.65x |
+| C++ | 199,333 | 68,732 | **0.34x** | 282,287 | 1.42x |
+| Python 3.14t (free-threaded) | 34,864 | 33,768 | 0.97x | 59,038 | 1.69x |
+| TypeScript (Node 22) | 16,879 | 17,059 | 1.01x | 56,947 | 3.37x |
+| Python 3.13 (GIL) | 40,512 | 11,734 | **0.29x** | 11,259 | 0.28x |
 
-- **Rust's `par` is flat (0.96x), not faster, despite `seq` already being
-  the fastest of all seven.** Investigated below — it's real, it's
-  explained, and it isn't a flaw in Rust or in this benchmark's design.
-- **C++'s `par` is still 2.8x *slower* than its own `seq`,** down from a
-  6x collapse before two real bugs (below) were found and fixed in
-  `ra-common-cpp`. What's left is diagnosed, not hand-waved.
-- **Python 3.13's `par` is 3.7x slower than `seq`** — `seda-bus-python`'s
-  own documented GIL-contention effect, reproduced here exactly.
+**The headline finding:** every implementation gets real, often substantial
+gains from parallelism — `chan` beats `seq` in all eight cases except
+GIL-bound Python. The `par` column is not a measure of "how parallel is
+this bus" — it's a measure of lock contention on one shared stage, and
+conflating the two was the error in this report's first draft. See
+`METHODOLOGY.md`'s "Does parallelism work?" section for the controlled
+comparison that proves this rather than asserts it.
+
+## What went wrong, and what's real
+
+- **Rust's original "flat `par`" (0.96x) was a measurement artifact**, not
+  a finding. The host was running concurrent Docker builds during the
+  original timed run; a clean rerun with nothing else executing shows real
+  scaling (`par` 1.24x) and, more importantly, `chan` shows Rust scaling
+  essentially as well as any implementation here (5.44x, second only to
+  Go). The original "near-zero bus overhead, nothing left to parallelize"
+  explanation was plausible-sounding and wrong — it explained a number that
+  was itself wrong.
+- **C++'s `par` collapse (0.34x) is real and reproduces consistently**
+  across multiple clean runs, unlike Rust's. Traced to two now-fixed bugs
+  (`ra-common-cpp` commits `8700729`, `7e5717b` — see `METHODOLOGY.md`) plus
+  one still-open issue: a mutex-guarded `/dev/urandom` handle shared across
+  *all* producer threads regardless of channel, which `chan` only partially
+  routes around (1.42x, real but far below Rust/Go's 5-6x).
+- **Python 3.13's GIL collapse (0.29x/0.28x) is real in both
+  configurations** — the GIL serializes bytecode execution regardless of
+  how many channels exist, so removing the channel-level lock doesn't help
+  when the deeper bottleneck is the interpreter itself.
 
 ## C++: two real bugs, found and fixed, one left diagnosed
 
-The first C++ run measured ~15,000 eps sequential — 20-30x slower than Rust
-for identical work between two hand-rolled-thread-pool, no-GC
-implementations that should be structurally comparable. That gap was
-investigated rather than accepted, twice:
+The first C++ run (before any fixes) measured ~15,000 eps sequential —
+20-30x slower than Rust for identical work between two hand-rolled-thread-
+pool, no-GC implementations that should be structurally comparable.
 
-1. **`ra-common-cpp` was re-opening `/dev/urandom`** (`fopen`/`fread`/
-   `fclose`) on *every* random-byte call, and envelope construction calls
-   it twice per envelope — 400,000 file-open cycles per trial. Every other
-   language's random source is a single syscall, or (Python's non-crypto
-   `random`) none at all. **Fixed: commit `8700729`** (keep the file handle
-   open for the process, mutex-guarded). Result: ~136,000 eps sequential,
-   an 8-9x improvement.
-2. **`Envelope::GetRoute()`/`Ratchet()` cloned the current route by
-   serializing it to a JSON tree and immediately re-parsing that tree back**
-   — just to get an independently-owned pointer. Found by isolating
-   envelope construction from bus overhead: a standalone loop building
-   200,000 envelopes with *no bus at all* ran at 1.19M eps — nearly 9x
-   faster than the full publish-through-bus benchmark's 136,000 eps at the
-   time, meaning ~89% of "bus overhead" wasn't the bus, it was this. Every
-   other port's `GetRoute()` just copies a reference; only C++ needs an
-   independently-owned clone (its `unique_ptr<Route>` ownership model), and
-   the JSON round trip was a spectacularly expensive way to get one.
-   **Fixed: commit `7e5717b`** (a proper virtual `Route::Clone()`). Result:
-   ~174,000 eps sequential.
+1. **`ra-common-cpp` was re-opening `/dev/urandom`**
+   (`fopen`/`fread`/`fclose`) on every random-byte call, twice per envelope
+   — 400,000 file-open cycles per trial. **Fixed: commit `8700729`.**
+2. **`Envelope::GetRoute()`/`Ratchet()` cloned routes via a JSON
+   serialize-then-reparse round trip** instead of a proper clone, found by
+   isolating envelope construction from bus overhead (200,000 envelopes,
+   no bus: 1.19M eps — 9x the full-bus number at the time). **Fixed: commit
+   `7e5717b`**, a proper virtual `Route::Clone()`.
 
-What's still open: `par` collapses to ~63,000 eps even after both fixes —
-2.8x slower than `seq`, though better than the pre-fix 3x collapse. The
-remaining cause is the same mutex from fix #1: every envelope still calls
-`SecureRandomBytes` twice, and those two calls per envelope, from all 8
-producer threads, still serialize through one mutex-guarded file handle.
-**Confirmed specifically worse under Docker than native**: a native
-(non-containerized) run on the same machine after fix #2 showed `par`
-(~157,000 eps) roughly matching `seq` (~156,000-176,000 eps) — no
-collapse — while the Docker run shown in the table above collapses to
-63,000. Reproduced twice, and `nproc` inside the container correctly
-reports all 12 host cores (not a CPU-limiting artifact). Not yet fixed —
-a good next step for `ra-common-cpp` would be per-thread random-byte
-buffering, or calling `getrandom()` directly instead of sharing one
-`FILE*`. Documented as a real, open, specific bottleneck, not chased
-further in this pass. **The numbers in the table above are Docker numbers**
-(the numbers this report commits to as canonical, per `METHODOLOGY.md`),
-which is why they show the collapse the native check does not.
+`seq` went from ~15,000 → ~136,000 (fix 1) → ~200,000 eps (fix 2) across
+both fixes, all Docker-measured. **Still open:** the shared `/dev/urandom`
+mutex is why `chan` (1.42x) trails Rust/Go's (5-6x) — independent channels
+remove the *queue* lock, not this second, separate one. Documented, not
+chased further this pass; see `METHODOLOGY.md` for the concrete next step
+(per-thread random buffering or `getrandom()` directly).
 
-## Rust: why `par` doesn't help, checked rather than assumed
+## Mutex vs. lock-free: why the design is what it is
 
-Rust's `par`/`seq` ratio (0.96x) looks like the same kind of red flag C++'s
-does. It isn't, and the difference is worth being precise about: this was
-checked by isolating envelope construction (no bus) under the same 1/2/4/8
-thread counts used for `seq`/`par`:
+`par`'s ceiling — real in every language, not just C++ — comes from a
+single mutex-guarded queue shared by every producer and consumer for a
+stage. That's the standard way to implement a bounded, backpressured
+multi-producer/multi-consumer queue (what every one of the seven ports
+does, including the Java original), not a deliberately introduced
+bottleneck: it makes correctness easy, `Block`/`DropOldest` back-pressure
+essentially free, and needs no dependency beyond each language's standard
+library. The cost is exactly what `par` measures — one serialization point,
+non-linear degradation under contention, worse under virtualization than
+native (confirmed this session). See `METHODOLOGY.md` for the full
+pros/cons and the lowest-risk improvement path (a two-lock queue, not a
+full lock-free rewrite).
 
-| threads | eps (envelope construction only, no bus) |
-|--:|--:|
-| 1 | 698,780 |
-| 2 | 945,253 |
-| 4 | 1,411,941 |
-| 8 | 1,846,991 |
+## Python: GIL vs. free-threaded
 
-Envelope construction alone scales close to linearly (2.6x from 1 to 8
-threads) — Rust's allocator and runtime are not the bottleneck, and there's
-no equivalent of C++'s bugs here. The full-bus benchmark not scaling is a
-property of *this specific benchmark's design*, not of `seda-bus-rust`:
-`seq`'s throughput (642,641 eps) is already within ~8% of what bare
-envelope construction alone can do (698,780 eps at 1 thread) — meaning bus
-overhead is close to zero for Rust, there's almost nothing left for more
-threads to parallelize, and `seda-bus-rust`'s single stage is one
-`Mutex<VecDeque<Envelope>>` shared by every producer *and* every drain
-worker. With near-zero per-envelope consumer work, 8 producers plus up to 8
-drain workers all contending on that one mutex costs more than the single
-producer/single drain-permit case saves — a well-known effect (lock
-contention dominating when there's too little work per critical section to
-amortize it over), not a defect. The other implementations' `par` *does*
-scale under the same single-mutex-per-channel design (Go, C#, Java, all
-1.5-1.8x) precisely because their sequential baselines are slower — there's
-proportionally more non-lock overhead (slower allocators, GC, in Java/C#/Go's
-case a heavier `ra-common` envelope) for added workers to still net a gain
-against, even with the identical contention pattern underneath.
+`seda-bus-python`'s own README documents a real ~2.6x free-threading
+speedup on actual CPU-bound work (hashcash/fib). This benchmark's consumer
+does almost no CPU work, so `par` (one shared channel, GIL or not) mostly
+measures lock contention, not free-threading's benefit — 3.14t's `par` is
+0.97x for exactly that reason. `chan` (no shared lock) shows the real
+signal: 1.69x here, up to 3.40x in an isolated native check with more
+trials — free-threading working once there's no artificial contention
+point in the way. 3.13's GIL cost (0.29x/0.28x) is real in both
+configurations, since the GIL serializes bytecode execution independent of
+channel topology.
 
-## Python: GIL vs. free-threaded, and why this benchmark undersells it
+## TypeScript: `chan` helps even with zero real OS parallelism
 
-`seda-bus-python` exists specifically to demonstrate free-threaded
-CPython's value for CPU-bound staged work — and its own README shows a real
-~2.6x speedup on an actual CPU-bound task (hashcash/fib) across a 12-core
-pool. This benchmark's consumer does almost no CPU work (one atomic
-increment), so there's very little for free-threading to parallelize:
-3.14t's `par`/`seq` ratio here is only 1.05x, far short of that 2.6x. What
-this benchmark *does* show clearly is the GIL cost on the other side:
-3.13's `par` collapses to 0.27x of its own `seq` — 8 threads fighting over
-the GIL on lock-heavy bus internals makes it slower than not using threads
-at all, exactly `seda-bus-python`'s own documented effect, now reproduced
-against an identical workload across all seven other implementations.
-
-## TypeScript: no scaling by design, not a bug
-
-`ts`'s `par`/`seq` ratio is 1.00x — expected, not a finding. Node runs
-JavaScript on one thread; `par` here means 8 concurrently-awaited
-async producer loops on that one event loop, not real parallelism (see
-`seda-bus/DESIGN.md`'s "True stage parallelism" row: TS only gets real
-parallelism for `worker`-configured stages, which this benchmark doesn't
-use, since the workload is a shared in-memory counter no worker-thread
-transport applies to).
+`ts`'s `par` is flat (1.01x, expected — Node is single-threaded, `par`
+means concurrent async tasks not OS parallelism). `chan` still shows a
+real 3.37x gain with **no CPU parallelism available at all** — a single
+heavily-contended channel carries real per-operation coordination overhead
+(permit-checking, promise/microtask scheduling) beyond lock-waiting, and
+splitting work across independent channels reduces that overhead even on
+one thread.
 
 ## Other attributes
 
 Pulled from [`seda-bus/DESIGN.md`](../DESIGN.md)'s own comparison table
-(§2.1) — that document is the maintained source, not re-derived here — plus
-three new columns from this benchmarking pass.
+(§2.1) — the maintained source, not re-derived here — plus three new
+columns.
 
 | | Java | Rust | Python | TypeScript | C++ | C# | Go |
 |---|--:|--:|--:|--:|--:|--:|--:|
@@ -157,24 +144,23 @@ three new columns from this benchmarking pass.
 | Race/sanitizer-verified | not run | not run | not run | not run | attempted, untrustworthy (TSan, sandboxed) | not run | **yes** (`go test -race`, clean, 5 runs) |
 | Guaranteed delivery | yes | no | no | no | no | no | no |
 
-Source LOC: `wc -l` over each port's library source only (no tests, no
-vendored dependencies, no build output) — see
-[`scripts/count_loc.sh`](scripts/count_loc.sh) for exactly what's counted
-per language.
+Source LOC: `wc -l` over each port's library source only — see
+[`scripts/count_loc.sh`](scripts/count_loc.sh).
 
 ## Reading this table honestly
 
-Rust and Java's absolute numbers being 2-4x everyone else's is a real,
-structural result (real OS-thread parallelism, no interpreter) — but part
-of Rust's lead specifically is that `seda-bus-rust` is the one port never
-rewired onto `ra-common`'s `Envelope` (own minimal struct, no JSON, no
-crypto-random IDs; see `seda-bus/DESIGN.md`), so this benchmark is not
-purely comparing "bus overhead" when Rust is one of the seven — it's also
-comparing a structurally lighter envelope against six implementations
-carrying `ra-common`'s heavier one. That asymmetry is a property of the
-`seda-bus` ecosystem (documented, not hidden), not a flaw introduced here.
-Within the six `ra-common`-carrying implementations, don't read three-digit
-percentage differences between adjacent rows (Go vs. C#, both ~150-270k) as
-meaningful given three trials on a shared-tenancy host; do read
-order-of-magnitude differences and `par`-vs-`seq` collapses as real —
-every one reported here was independently checked, not assumed.
+Rust and Go's `chan` numbers being 5-6x, well ahead of Java/C#'s 2.6-2.8x,
+is a real, structural result (both compile to native code with real OS
+threads and no GC pause risk) — but part of Rust's overall lead is also
+that `seda-bus-rust` is the one port never rewired onto `ra-common`'s
+`Envelope` (own minimal struct, no JSON, no crypto-random IDs; see
+`seda-bus/DESIGN.md`), so this benchmark isn't purely comparing "bus
+overhead" when Rust is one of the seven — it's also comparing a
+structurally lighter envelope against six implementations carrying
+`ra-common`'s heavier one. That's a property of the `seda-bus` ecosystem,
+documented not hidden. Within the six `ra-common`-carrying implementations,
+don't read close percentage differences between adjacent rows as
+meaningful given three trials on a single host; do read order-of-magnitude
+differences, `par`-vs-`chan` gaps, and collapses as real — every one
+reported here was independently checked against a clean, isolated
+measurement, not assumed from a single run.

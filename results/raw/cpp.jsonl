@@ -1,6 +1,9 @@
-{"language":"cpp","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1098,"throughput_eps":182018.252144,"drained":true}
-{"language":"cpp","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1135,"throughput_eps":176190.316961,"drained":true}
-{"language":"cpp","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1222,"throughput_eps":163627.613322,"drained":true}
-{"language":"cpp","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":2927,"throughput_eps":68325.653247,"drained":true}
-{"language":"cpp","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":3410,"throughput_eps":58638.192952,"drained":true}
-{"language":"cpp","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":3278,"throughput_eps":61002.165412,"drained":true}
+{"language":"cpp","config":"seq","trial":1,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":960,"throughput_eps":208190.724639,"drained":true}
+{"language":"cpp","config":"seq","trial":2,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":1087,"throughput_eps":183859.865056,"drained":true}
+{"language":"cpp","config":"seq","trial":3,"producers":1,"concurrency":1,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":971,"throughput_eps":205947.410274,"drained":true}
+{"language":"cpp","config":"par","trial":1,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":2616,"throughput_eps":76436.859531,"drained":true}
+{"language":"cpp","config":"par","trial":2,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":3081,"throughput_eps":64910.677446,"drained":true}
+{"language":"cpp","config":"par","trial":3,"producers":8,"concurrency":8,"channels":1,"total":200000,"delivered":200000,"elapsed_ms":3084,"throughput_eps":64847.567250,"drained":true}
+{"language":"cpp","config":"chan","trial":1,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":693,"throughput_eps":288260.058124,"drained":true}
+{"language":"cpp","config":"chan","trial":2,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":718,"throughput_eps":278191.391967,"drained":true}
+{"language":"cpp","config":"chan","trial":3,"producers":8,"concurrency":1,"channels":8,"total":200000,"delivered":200000,"elapsed_ms":713,"throughput_eps":280408.980648,"drained":true}
