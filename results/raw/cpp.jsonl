@@ -1,6 +1,6 @@
-{"language":"cpp","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1208,"throughput_eps":165545.835141,"drained":true}
-{"language":"cpp","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1674,"throughput_eps":119472.107000,"drained":true}
-{"language":"cpp","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1635,"throughput_eps":122288.502536,"drained":true}
-{"language":"cpp","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":4651,"throughput_eps":42995.745694,"drained":true}
-{"language":"cpp","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":4177,"throughput_eps":47874.328860,"drained":true}
-{"language":"cpp","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":4452,"throughput_eps":44920.323363,"drained":true}
+{"language":"cpp","config":"seq","trial":1,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1098,"throughput_eps":182018.252144,"drained":true}
+{"language":"cpp","config":"seq","trial":2,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1135,"throughput_eps":176190.316961,"drained":true}
+{"language":"cpp","config":"seq","trial":3,"producers":1,"concurrency":1,"total":200000,"delivered":200000,"elapsed_ms":1222,"throughput_eps":163627.613322,"drained":true}
+{"language":"cpp","config":"par","trial":1,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":2927,"throughput_eps":68325.653247,"drained":true}
+{"language":"cpp","config":"par","trial":2,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":3410,"throughput_eps":58638.192952,"drained":true}
+{"language":"cpp","config":"par","trial":3,"producers":8,"concurrency":8,"total":200000,"delivered":200000,"elapsed_ms":3278,"throughput_eps":61002.165412,"drained":true}

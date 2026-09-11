@@ -38,53 +38,79 @@ thermal throttling) is not controlled for. Treat every number here as
 comparisons (which implementation is faster than which, how much `par`
 helps) are far more trustworthy than any single absolute throughput figure.
 
-## What went wrong once, and what it means for reading these numbers
+## What went wrong, twice, and what it means for reading these numbers
 
 The first C++ run showed ~15,000 envelopes/sec sequential — 20-30x slower
 than Rust for an *identical* workload on two languages with nearly
 identical bus designs (hand-rolled thread pool, no GC). That gap was
-investigated, not accepted: `ra-common-cpp`'s random-byte source
-(`SecureRandomBytes`) was re-opening `/dev/urandom` with a fresh
-`fopen`/`fread`/`fclose` on *every single call*, and envelope construction
-calls it twice (once for the envelope id, once for the route's internal
-id) — 400,000 file-open cycles per trial. Every other language's random
-source is a single syscall (Go's `crypto/rand`, C#'s
-`RandomNumberGenerator`, Node's `crypto.randomBytes`) or, for Python's
-non-cryptographic `random` module, no syscall at all. Rust doesn't touch
-randomness for IDs at all (`nanos-seq`). This was fixed in `ra-common-cpp`
-(commit `8700729`) — keep the file handle open for the process, guarded by
-a mutex — which brought C++ to ~8-9x faster, in the range of the other
-compiled/hand-rolled-pool implementations. **The numbers in this report are
-post-fix.**
+investigated, not accepted, and it took two separate fixes, not one:
 
-The reason this is in the methodology doc rather than a footnote: it's the
-best argument for why "throughput should all be about the same since
-processing is negligible" is *not* a safe assumption to build this
-benchmark around, and it's exactly what a workload this small is good for
-finding. A 20-30x gap between two structurally similar implementations is
-never "just how the language is" — it's a bug waiting to be found, and a
-trivial-consumer benchmark makes bus/library overhead the *only* thing
-being measured, which is precisely what surfaced this one. See
-`RESULTS.md`'s C++ section for the before/after numbers.
+1. `ra-common-cpp`'s random-byte source (`SecureRandomBytes`) was
+   re-opening `/dev/urandom` with a fresh `fopen`/`fread`/`fclose` on
+   *every single call*, and envelope construction calls it twice (once for
+   the envelope id, once for the route's internal id) — 400,000 file-open
+   cycles per trial. Every other language's random source is a single
+   syscall or, for Python's non-cryptographic `random` module, no syscall
+   at all. **Fixed: commit `8700729`** — keep the file handle open for the
+   process, guarded by a mutex. ~136,000 eps, an 8-9x improvement.
+2. That still left C++ ~4.7x behind Rust. Rather than accept "C++ is just
+   slower," an isolated micro-benchmark measured envelope construction
+   *alone*, no bus at all: 200,000 envelopes in a tight loop hit 1.19M eps —
+   nearly 9x faster than the full publish-through-bus number at the time.
+   That gap pointed straight at the bus path itself, and
+   `Envelope::GetRoute()`/`Ratchet()` turned out to clone the current route
+   by serializing it to a JSON tree and immediately re-parsing that tree
+   back, just to get an independently-owned pointer — every other port's
+   `GetRoute()` just copies a reference, since only C++'s `unique_ptr`
+   ownership model needs an independent clone at all. **Fixed: commit
+   `7e5717b`** — a proper virtual `Route::Clone()` instead. ~174,000 eps.
 
-`par` for C++ doesn't just fail to scale past `seq` after the fix — inside
-Docker it gets *dramatically worse* (~45,000 eps vs. ~136,000 eps for
-`seq`; see `RESULTS.md`), where a native, non-containerized run on the same
-machine showed `par` roughly matching `seq` (~120,000 eps both). The root
-cause is the same either way: every envelope still calls
-`SecureRandomBytes` twice, and those now serialize through one
-mutex-guarded file handle shared by all 8 producer threads. What's new is
-that this specific bottleneck — 8 threads contending on one mutex/futex —
-is markedly more expensive under Docker Desktop's virtualization layer than
-running natively; confirmed reproducible (two independent runs, both
-~3x worse under `par`) and not a CPU-limiting artifact (`nproc` inside the
-container correctly reports all 12 host cores). This is documented, not
-chased further — fixing the underlying contention (e.g., per-thread
-buffering, or `getrandom()` directly instead of a shared `FILE*`) is future
-work. It's also a small, concrete illustration of this report's bigger
-caveat: *where* you run a benchmark can change not just the numbers but
-which implementation looks best, especially for anything gated on lock
-contention.
+This pattern — isolate the suspicious component with a micro-benchmark,
+don't accept "that's just how it is" — is why both bugs are in this
+document and not a footnote. A 20-30x gap between two structurally similar
+implementations is never "just how the language is." See `RESULTS.md`'s
+C++ section for the full before/after numbers, both fixes.
+
+`par` for C++ still doesn't scale past `seq` even after both fixes — it
+collapses to ~63,000 eps against `seq`'s ~174,000, a 2.8x drop (down from
+6x before the fixes). The remaining cause is the same mutex from fix #1:
+every envelope still calls `SecureRandomBytes` twice, and those two calls,
+from up to 8 producer threads, still serialize through one mutex-guarded
+file handle. This specific bottleneck is confirmed markedly more expensive
+under Docker's virtualization than running natively — a native,
+non-containerized run on the same machine after both fixes showed `par`
+(~157,000 eps) roughly matching `seq` (~156,000-176,000 eps), no collapse
+at all — reproduced twice under Docker, and not a CPU-limiting artifact
+(`nproc` inside the container correctly reports all 12 host cores). This is
+documented, not chased further in this pass — a good next step for
+`ra-common-cpp` would be per-thread random-byte buffering, or calling
+`getrandom()` directly instead of sharing one `FILE*`. It's also a small,
+concrete illustration of this report's bigger caveat: *where* you run a
+benchmark can change not just the numbers but which implementation looks
+best, especially for anything gated on lock contention.
+
+## Rust's flat `par`: checked with the same rigor, different verdict
+
+Rust's `par`/`seq` ratio (0.96x, effectively flat) looks like the same kind
+of red flag as C++'s collapse. It was checked the same way — isolate
+envelope construction from bus overhead — with the opposite conclusion.
+Envelope construction alone, run at the same 1/2/4/8 thread counts as
+`seq`/`par`, scales close to linearly (698,780 → 1,846,991 eps, 2.6x at 8
+threads): Rust's allocator and runtime are not the bottleneck, and there is
+no hidden bug analogous to C++'s two. What's actually happening: Rust's
+`seq` (642,641 eps) is already within ~8% of bare single-threaded envelope
+construction (698,780 eps) — bus overhead is close to zero, so there's
+almost nothing left for more threads to parallelize — and
+`seda-bus-rust`'s one channel is a single `Mutex<VecDeque<Envelope>>`
+shared by every producer *and* every drain worker. With near-zero
+per-envelope consumer work, 8 producers plus up to 8 drain workers
+contending on that one mutex costs more than the extra parallelism saves —
+a well-known effect (lock contention dominating when there's too little
+work per critical section to amortize it), not a defect. Go/C#/Java's
+`par` *does* scale under the identical single-mutex-per-channel design
+(1.5-1.8x) precisely because their slower sequential baselines leave more
+non-lock overhead for added workers to net a gain against. See
+`RESULTS.md`'s Rust section for the full thread-count table.
 
 ## Known limitations (by design, not oversight)
 

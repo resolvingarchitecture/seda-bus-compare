@@ -54,9 +54,15 @@ setup.sh            verifies/clones the sibling repos this depends on
 
 ## What this found
 
-Building this surfaced a real bug, not just numbers: the first C++ run was
-20-30x slower than Rust for identical work, traced to `ra-common-cpp`
-reopening `/dev/urandom` on every random-byte call. Fixed upstream
-(`ra-common-cpp` commit `8700729`) — see `METHODOLOGY.md` for the full
-story. That's the kind of thing a same-shape cross-language benchmark is
-for.
+Building this surfaced two real bugs, not just numbers — the first C++ run
+was 20-30x slower than Rust for identical work. Traced to `ra-common-cpp`
+reopening `/dev/urandom` on every random-byte call (fixed, commit
+`8700729`), then, after an isolated micro-benchmark showed envelope
+construction alone was 9x faster than the full bus path, to
+`Envelope::GetRoute()` cloning routes via a JSON serialize/re-parse round
+trip instead of a proper clone (fixed, commit `7e5717b`). A third issue —
+the remaining `par` collapse under Docker specifically — was found,
+confirmed reproducible, and documented as open rather than chased further.
+Rust's own flat `par` was checked with the same rigor and turned out *not*
+to be a bug: see `METHODOLOGY.md` for both investigations in full. That's
+the kind of thing a same-shape cross-language benchmark is for.
