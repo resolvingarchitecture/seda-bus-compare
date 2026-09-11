@@ -77,12 +77,12 @@ process failure: the failure is more instructive than the fix. A benchmark
 number that can't survive "did anything else touch the CPU while this
 ran?" isn't a number yet.
 
-## C++: two real bugs, found and fixed, one left diagnosed
+## C++: three real bugs, found and fixed
 
 The first (contaminated) C++ run measured ~15,000 eps sequential — 20-30x
 slower than Rust for identical work between two hand-rolled-thread-pool,
 no-GC implementations that should be structurally comparable. Investigated
-rather than accepted, and it took two separate fixes:
+rather than accepted, and it took three separate fixes:
 
 1. **`ra-common-cpp` was re-opening `/dev/urandom`**
    (`fopen`/`fread`/`fclose`) on *every* random-byte call, and envelope
@@ -99,17 +99,34 @@ rather than accepted, and it took two separate fixes:
    pointer — every other port's `GetRoute()` just copies a reference, since
    only C++'s `unique_ptr` ownership model needs an independent clone at
    all. **Fixed: commit `7e5717b`** — a proper virtual `Route::Clone()`.
+3. Fix 1 kept the `/dev/urandom` handle open for the process but put a
+   single `std::mutex` around it, shared by every thread regardless of
+   which channel it published to. That's invisible in `par` (already
+   serialized on the channel's own queue lock) but directly visible in
+   `chan` (independent channels, *no* shared queue lock at all) — `chan`
+   still only reached 1.42x over `seq`, far below Rust/Go's 5-6x, and
+   nothing about independent channels should cap scaling that hard.
+   **Fixed: commit `1b3f687`** — replaced the shared `FILE*`+mutex with
+   `getentropy(2)`, a direct syscall with no shared file descriptor or
+   handle, so no lock is needed at all; each thread just calls it.
 
-Both fixes are real, verified, and reflected in every C++ number in
-`RESULTS.md`. What's still open: `chan` for C++ shows real improvement
-(1.42x over `seq`) but far less than Rust/Go's 5-6x — because every
-envelope still calls the now-fixed-but-still-shared `SecureRandomBytes`
-twice, and that single mutex-guarded file handle is shared across *all* 8
-producer threads regardless of which channel they publish to. Independent
-channels remove the channel-queue lock; they don't remove this second,
-separate lock. Not fixed in this pass — a good next step would be
-per-thread random-byte buffering, or `getrandom()` directly instead of a
-shared `FILE*`.
+All three fixes are real, verified, and reflected in every C++ number in
+`RESULTS.md`. Fix 3's effect was immediate and large: `chan` went from
+282,287 eps (1.42x) to 712,444 eps (**5.29x**) — right in Rust/Go's range,
+confirming the shared mutex, not anything structural about C++ or its
+queue implementation, was the ceiling.
+
+That result also settles what fix 3 was *not* responsible for: `par`
+stayed collapsed (0.48x, statistically the same as the 0.34x measured
+before the fix) even after the urandom mutex was gone. Since `chan` has no
+shared queue and improved 3.7x from this fix while `par` (which does have
+a shared queue) didn't move, the urandom mutex was never `par`'s problem —
+`par`'s bottleneck is the channel's own bounded-queue lock, and
+specifically its behavior under Docker: a native (non-containerized) run
+of the identical post-fix binary shows `par` essentially matching `seq`
+(no collapse at all), the same native/Docker gap noted in the first round
+of C++ fixes. That's now the closed, fully-explained version of the C++
+story — no open items left on this pass.
 
 ## Does parallelism work? Yes — once you check what "parallel" means here
 
@@ -234,7 +251,7 @@ reduces that overhead even on one thread.
   performance) by each port's own test suite.
 - **Three trials, single machine.** Enough to see real, order-of-magnitude
   effects (this document exists because that's exactly what it took to
-  catch a contaminated run and two real bugs), not enough for statistical
+  catch a contaminated run and three real bugs), not enough for statistical
   rigor on small differences between structurally similar implementations.
 - **The Java/`common` version-skew workaround.** `seda-bus-java`'s
   `pom.xml` depends on `resolvingarchitecture:common:1.2.0`, but

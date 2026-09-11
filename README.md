@@ -54,7 +54,7 @@ setup.sh            verifies/clones the sibling repos this depends on
 
 ## What this found
 
-Building this surfaced two real bugs and one real methodology failure —
+Building this surfaced three real bugs and one real methodology failure —
 not just numbers.
 
 The first full run reported Rust's `par` as flat and explained why with a
@@ -71,8 +71,12 @@ random-byte call (fixed, commit `8700729`), then, after an isolated
 micro-benchmark showed envelope construction alone was 9x faster than the
 full bus path, to `Envelope::GetRoute()` cloning routes via a JSON
 serialize/re-parse round trip instead of a proper clone (fixed, commit
-`7e5717b`). A third issue — C++'s remaining `chan` gap versus Rust/Go — was
-found, traced to a still-shared mutex, and documented as open.
+`7e5717b`). A third bug — a single process-wide mutex still guarding the
+(by-then already fixed) `/dev/urandom` handle, serializing every thread
+regardless of channel — capped C++'s independent-channel scaling at 1.42x
+versus Rust/Go's 5-6x; fixed by switching to `getentropy(2)`, a direct
+syscall needing no shared state or lock (commit `1b3f687`), which took
+`chan` to 5.29x.
 
 The biggest structural finding: the benchmark's original `par` config (many
 producers on one shared channel) measures lock contention, not parallel
