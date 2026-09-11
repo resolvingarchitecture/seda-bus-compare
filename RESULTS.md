@@ -15,8 +15,9 @@ from that run — see "Latency" below and `METHODOLOGY.md` for what changed
 and why the throughput numbers shifted slightly from the previous report).
 Raw data: [`results/raw/*.jsonl`](results/raw/),
 [`results/summary.csv`](results/summary.csv). Regenerate with
-`./scripts/build_and_run.sh && python3 scripts/aggregate.py` — on a quiet
-host; see `METHODOLOGY.md` for why that matters.
+`./scripts/build_and_run.sh && python3 scripts/aggregate.py && python3 scripts/plot_charts.py`
+— on a quiet host; see `METHODOLOGY.md` for why that matters. The chart
+script needs `matplotlib` (`pip install matplotlib`).
 
 ## Throughput: three configurations, not two
 
@@ -40,6 +41,8 @@ mean of 3 trials (see `results/summary.csv` for min/max ranges).
 | Python 3.14t (free-threaded) |  33,258 |  31,930 |       0.96x |        91,537 |        2.75x |
 | TypeScript (Node 22)         |  16,344 |  16,577 |       1.01x |        51,407 |        3.15x |
 | Python 3.13 (GIL)            |  35,892 |  10,958 |   **0.31x** |        11,959 |        0.33x |
+
+![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
 
 Numbers shifted a little from the previous report across every language,
 not just C++ — adding latency instrumentation (one clock read on publish,
@@ -99,6 +102,8 @@ throughput, and it shows things throughput alone hides completely.
 | Python 3.13 (GIL) | seq    |        18,531.7 |     87,611.4 |    102,829.6 |    136,593.7 |
 | Python 3.13 (GIL) | par    | **8,732,330.5** | 12,962,985.8 | 13,036,713.4 | 13,510,741.4 |
 | Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
+
+![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
 
 **The standout finding: TypeScript's and Python's `seq`/`par` latency is in
 the single-digit *seconds*, while every other implementation stays in the
