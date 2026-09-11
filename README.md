@@ -13,9 +13,67 @@ dependencies, envelope source, and more).
 
 - **[`METHODOLOGY.md`](METHODOLOGY.md)** — what's measured, how, and — just
   as important — what it doesn't mean. Read this before the numbers.
-- **[`RESULTS.md`](RESULTS.md)** — the numbers.
+- **[`RESULTS.md`](RESULTS.md)** — the full numbers and narrative.
 - **[`bench/WORKLOAD.md`](bench/WORKLOAD.md)** — the benchmark specification
   every `bench/<lang>` program implements identically.
+
+## Results at a glance
+
+Full narrative in [`RESULTS.md`](RESULTS.md); read
+[`METHODOLOGY.md`](METHODOLOGY.md) first — the first pass at these numbers
+was wrong (a contaminated host, caught and corrected) and these are
+directional, not authoritative. `seq` = 1 producer/1 channel;
+`par` = 8 producers sharing 1 channel (lock contention); `chan` = 8
+producers, 8 independent channels (real parallel capacity). 200,000
+envelopes/trial, 3 trials/config, all envelopes/sec.
+
+| Implementation               |     seq |     par | par vs. seq |          chan | chan vs. seq |
+|------------------------------|--------:|--------:|------------:|--------------:|-------------:|
+| Rust                         | 469,164 | 719,627 |       1.53x | **2,725,588** |    **5.81x** |
+| Go                           | 116,026 | 298,989 |       2.58x |       989,465 |    **8.53x** |
+| Java                         | 307,890 | 543,493 |       1.77x |       903,183 |        2.93x |
+| C++                          | 124,811 |  58,379 |   **0.47x** |       632,414 |        5.07x |
+| C#                           | 158,952 | 282,073 |       1.77x |       420,814 |        2.65x |
+| Python 3.14t (free-threaded) |  33,258 |  31,930 |       0.96x |        91,537 |        2.75x |
+| TypeScript (Node 22)         |  16,344 |  16,577 |       1.01x |        51,407 |        3.15x |
+| Python 3.13 (GIL)            |  35,892 |  10,958 |   **0.31x** |        11,959 |        0.33x |
+
+![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
+
+Latency (`p50`/`p99`/`p999`/`max`, microseconds) tells a different story —
+it's queueing delay under a producer/consumer rate mismatch, not raw
+dispatch cost (`bench/WORKLOAD.md` explains why), and it's what actually
+exposes TypeScript's and Python's multi-*second* backlogs under `seq`/`par`,
+invisible in the throughput table above:
+
+| Implementation    | Config |        p50 (us) |     p99 (us) |    p999 (us) |     max (us) |
+|-------------------|--------|----------------:|-------------:|-------------:|-------------:|
+| Rust              | seq    |             9.8 |        771.0 |      1,116.8 |      2,210.6 |
+| Rust              | par    |            43.0 |      1,867.6 |      2,419.8 |      5,451.7 |
+| Rust              | chan   |         3,467.9 |     13,660.0 |     14,407.2 |     15,286.4 |
+| Go                | seq    |           618.9 |      5,150.4 |      7,194.9 |      8,569.6 |
+| Go                | par    |         2,756.1 |     10,660.9 |     11,799.1 |     19,957.1 |
+| Go                | chan   |         8,855.6 |     37,160.2 |     42,722.5 |     47,050.7 |
+| Java              | seq    |             6.3 |         30.5 |         90.9 |      3,583.0 |
+| Java              | par    |            12.3 |      1,137.9 |      2,027.3 |      4,001.0 |
+| Java              | chan   |            10.8 |      1,611.8 |      2,913.2 |      6,004.8 |
+| C++               | seq    |            30.9 |      2,419.7 |      3,316.1 |      6,444.7 |
+| C++               | par    |            16.6 |        118.7 |        508.2 |      2,161.6 |
+| C++               | chan   |         7,466.9 |     36,392.1 |     39,156.6 |     42,607.2 |
+| C#                | seq    |             6.2 |         75.8 |      2,039.1 |     37,001.5 |
+| C#                | par    |            10.2 |        122.4 |      1,595.7 |     12,550.3 |
+| C#                | chan   |            11.9 |        435.9 |      2,901.8 |      9,638.3 |
+| Python 3.14t      | seq    |            41.5 |     10,141.1 |     15,607.1 |     43,090.2 |
+| Python 3.14t      | par    | **1,214,855.4** |  2,019,934.4 |  2,024,248.2 |  2,163,819.5 |
+| Python 3.14t      | chan   |         1,159.9 |     32,746.1 |     44,886.0 |     58,822.5 |
+| TypeScript        | seq    | **5,868,878.1** |  7,097,218.5 |  7,100,861.2 |  7,138,256.1 |
+| TypeScript        | par    | **5,802,716.0** |  7,023,989.9 |  7,033,335.5 |  7,138,062.2 |
+| TypeScript        | chan   |     1,516,281.1 |  1,884,631.7 |  1,890,423.6 |  1,948,672.1 |
+| Python 3.13 (GIL) | seq    |        18,531.7 |     87,611.4 |    102,829.6 |    136,593.7 |
+| Python 3.13 (GIL) | par    | **8,732,330.5** | 12,962,985.8 | 13,036,713.4 | 13,510,741.4 |
+| Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
+
+![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
 
 ## Reproducing this
 
