@@ -271,19 +271,45 @@ Source LOC: `wc -l` over each port's library source only — see
 
 Rust and Go's `chan` numbers being 5-6x, well ahead of Java/C#'s 2.6-2.8x,
 is a real, structural result (both compile to native code with real OS
-threads and no GC pause risk) — but part of Rust's overall lead is also
-that `seda-bus-rust` is the one port never rewired onto `ra-common`'s
-`Envelope` (own minimal struct, no JSON, no crypto-random IDs; see
-`seda-bus/DESIGN.md`), so this benchmark isn't purely comparing "bus
-overhead" when Rust is one of the seven — it's also comparing a
-structurally lighter envelope against six implementations carrying
-`ra-common`'s heavier one. That's a property of the `seda-bus` ecosystem,
-documented not hidden. Within the six `ra-common`-carrying implementations,
-don't read close percentage differences between adjacent rows as
-meaningful given three trials on a single host; do read order-of-magnitude
-differences, `par`-vs-`chan` gaps, and collapses as real — every one
-reported here was independently checked against a clean, isolated
-measurement, not assumed from a single run.
+threads and no GC pause risk). Within the six `ra-common`-carrying
+implementations, don't read close percentage differences between adjacent
+rows as meaningful given three trials on a single host; do read
+order-of-magnitude differences, `par`-vs-`chan` gaps, and collapses as
+real — every one reported here was independently checked against a clean,
+isolated measurement, not assumed from a single run.
+
+**A previous version of this section claimed part of Rust's lead came from
+`seda-bus-rust` being the one port never rewired onto `ra-common`'s
+`Envelope`** — own minimal struct, presumed cheaper than `ra-common`'s
+heavier one with its routing slip, `Did`, headers map, and document tree.
+That claim was never actually measured, and when it was — a user pushed
+back with "it's just code," which is exactly the kind of specific
+skepticism this report exists to check — it turned out backwards. An
+isolated construction benchmark (200,000 iterations, same 4-byte payload,
+no bus involved, the same isolation technique used to catch both real C++
+bugs above) showed `ra-common-rust`'s `Envelope::document()` + `add_content`
+building **~800-860k envelopes/sec, actually faster than `seda-bus-rust`'s
+own `Envelope::new()` at ~700-705k/sec** — consistent across five runs.
+Two concrete reasons: `seda-bus-rust`'s own id generator calls
+`SystemTime::now()` (a syscall) and then hex-formats a `u128` into a
+heap-allocated `String`, while `ra-common-rust`'s `Uuid::new_v4()` is one
+`getrandom` syscall plus simpler fixed-width formatting — cheaper in
+practice, not more expensive; and `ra-common-rust`'s `Route` clones via a
+plain `#[derive(Clone)]`, not the JSON-serialize-and-reparse round trip
+that was specific to C++'s `unique_ptr`-based ownership model (bug 2
+above) — Rust never had that problem to begin with.
+
+**So: no evidence that rewiring `seda-bus-rust` onto `ra-common-rust` would
+cost throughput** — if anything, this isolated result points the other
+way. This is construction-only, not a full rewired end-to-end benchmark
+(a real rewire could still surface something this micro-benchmark can't
+see), so it's not proof the two are equivalent — but the specific claim
+that `seda-bus-rust`'s own envelope is a source of its throughput lead
+is retracted, not just softened. Rust being the one port not built on
+`ra-common` remains true and worth knowing as an ecosystem fact (see
+`seda-bus/DESIGN.md`); it just isn't established to be a *performance*
+advantage, which is the distinction the earlier version of this section
+blurred.
 
 The same applies to the latency table: read the multi-second `seq`/`par`
 numbers for TS/Python as a real backlog finding (order-of-magnitude, and
