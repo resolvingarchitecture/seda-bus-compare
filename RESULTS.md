@@ -9,12 +9,12 @@ three real bugs in `ra-common-cpp` and a genuine gap in how this
 benchmark's `par` configuration was being interpreted. Everything below
 reflects that — this is the corrected report, not the first draft.
 
-**Run date:** 2026-09-11 (latest rerun: added per-envelope latency
-measurement to all seven implementations, all numbers below regenerated
-from that run — see "Latency" below and `METHODOLOGY.md` for what changed
-and why the throughput numbers shifted slightly from the previous report).
-Raw data: [`results/raw/*.jsonl`](results/raw/),
-[`results/summary.csv`](results/summary.csv). Regenerate with
+**Run date:** 2026-09-11 (latest rerun: `seda-bus-rust` rewired onto
+`ra-common-rust`, same as every other port, plus per-envelope latency
+measurement added across all seven — see "Rust: the `ra-common` rewire"
+and "Latency" below for what changed and why the numbers moved). Raw data:
+[`results/raw/*.jsonl`](results/raw/), [`results/summary.csv`](results/summary.csv).
+Regenerate with
 `./scripts/build_and_run.sh && python3 scripts/aggregate.py && python3 scripts/plot_charts.py`
 — on a quiet host; see `METHODOLOGY.md` for why that matters. The chart
 script needs `matplotlib` (`pip install matplotlib`).
@@ -33,7 +33,7 @@ mean of 3 trials (see `results/summary.csv` for min/max ranges).
 
 | Implementation               |     seq |     par | par vs. seq |          chan | chan vs. seq |
 |------------------------------|--------:|--------:|------------:|--------------:|-------------:|
-| Rust                         | 469,164 | 719,627 |       1.53x | **2,725,588** |    **5.81x** |
+| Rust                         | 208,568 | 516,836 |       2.48x | **1,075,379** |        5.16x |
 | Go                           | 116,026 | 298,989 |       2.58x |       989,465 |    **8.53x** |
 | Java                         | 307,890 | 543,493 |       1.77x |       903,183 |        2.93x |
 | C++                          | 124,811 |  58,379 |   **0.47x** |       632,414 |        5.07x |
@@ -44,14 +44,15 @@ mean of 3 trials (see `results/summary.csv` for min/max ranges).
 
 ![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
 
-Numbers shifted a little from the previous report across every language,
-not just C++ — adding latency instrumentation (one clock read on publish,
-one on delivery, one array write per envelope, in every implementation)
-adds a small, equally-shaped constant cost everywhere, plus normal run-to-
-run noise (see "Reading this table honestly"). Rankings and order-of-
-magnitude gaps are unchanged. **Go's `chan` ratio (8.53x) is now the
-highest of the eight**, ahead of Rust's 5.81x, though Rust's absolute `chan`
-throughput (2.73M eps) still leads by a wide margin — a smaller `seq`
+**Rust's numbers dropped substantially from the previous report** — `seq`
+469,164 → 208,568, `chan` 2,725,588 → 1,075,379 — because `seda-bus-rust`
+is no longer the one port outside this comparison's main variable: it's
+now rewired onto `ra-common-rust`'s `Envelope`, same as the other six. See
+"Rust: the `ra-common` rewire" below for why that costs real throughput,
+not just changes bookkeeping. Every other language's numbers hold steady
+run-to-run within normal noise. **Go's `chan` ratio (8.53x) is the highest
+of the eight**, ahead of Rust's 5.16x, though Rust's absolute `chan`
+throughput (1.08M eps) still leads Go's (989K) — a smaller `seq`
 denominator makes for a bigger ratio without changing which implementation
 is actually fastest in absolute terms; read the ratio and the absolute
 number as answering different questions, not the same one.
@@ -78,9 +79,9 @@ throughput, and it shows things throughput alone hides completely.
 
 | Implementation    | Config |        p50 (us) |     p99 (us) |    p999 (us) |     max (us) |
 |-------------------|--------|----------------:|-------------:|-------------:|-------------:|
-| Rust              | seq    |             9.8 |        771.0 |      1,116.8 |      2,210.6 |
-| Rust              | par    |            43.0 |      1,867.6 |      2,419.8 |      5,451.7 |
-| Rust              | chan   |         3,467.9 |     13,660.0 |     14,407.2 |     15,286.4 |
+| Rust              | seq    |    **127,088.2**† |    243,387.0 |    245,277.2 |    291,585.8 |
+| Rust              | par    |            62.0 |      5,496.6 |      7,079.5 |     11,430.8 |
+| Rust              | chan   |        22,022.1 |     52,850.4 |     55,073.8 |     63,226.8 |
 | Go                | seq    |           618.9 |      5,150.4 |      7,194.9 |      8,569.6 |
 | Go                | par    |         2,756.1 |     10,660.9 |     11,799.1 |     19,957.1 |
 | Go                | chan   |         8,855.6 |     37,160.2 |     42,722.5 |     47,050.7 |
@@ -104,6 +105,23 @@ throughput, and it shows things throughput alone hides completely.
 | Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
 
 ![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
+
+**† Rust's `seq` latency is not a trustworthy number and is flagged, not
+hidden.** `seq` has exactly one consumer thread draining a queue holding
+all 200,000 envelopes at once (the same backlog-by-design structure
+documented below for TS/Python) — so if that single thread is paused by
+the host scheduler for even a few milliseconds, the *entire remaining
+backlog's* measured latency shifts by that amount. On this benchmark host,
+repeated runs showed real multi-millisecond single-thread scheduling
+stalls (confirmed with an isolated `Instant::now()` jitter probe, unrelated
+to this bus's code), and Rust's `seq` — now several hundred milliseconds
+long per trial post-rewire, up from ~350ms before it — has enough time
+exposure to reliably catch one. `par`/`chan` (8 threads, shorter trials)
+mostly don't. The throughput numbers above are unaffected (computed from
+only two clock reads per trial, not one pair per envelope) and were
+consistent within a tight band across many reruns; the `seq` latency row
+is reported for completeness, not as a precise measurement — a clean
+number needs a dedicated quiet host, not something achieved this pass.
 
 **The standout finding: TypeScript's and Python's `seq`/`par` latency is in
 the single-digit *seconds*, while every other implementation stays in the
@@ -208,6 +226,53 @@ the urandom mutex was never `par`'s problem: `par`'s bottleneck is the
 channel's own bounded-queue lock under Docker specifically (a native run of
 the identical binary shows `par` ≈ `seq`; see `METHODOLOGY.md`).
 
+## Rust: the `ra-common` rewire
+
+`seda-bus-rust` was the one port never built on `ra-common` — its own
+minimal 7-field `Envelope` (`id`, `to`, `sender`, `headers`, `payload:
+Vec<u8>`, `slip: VecDeque<String>`, `attempts`). Asked directly whether
+rewiring it onto `ra-common-rust`'s richer `Envelope` (a routing slip,
+`Did`, headers map, document tree) would cost anything — "it's just code"
+— the honest answer needed a real rewire and a real measurement, not an
+inference. Both are done now (`ra_common::Envelope`, `make_envelope`/
+`envelope_payload`/`target_service` mirroring the other six ports'
+helpers, per-hop `attempts` moved onto the channel keyed by envelope id
+since `ra_common::Envelope` has none — same pattern as every other port).
+
+The first check was a construction-only micro-benchmark, and it said the
+rewire was free — `ra_common::Envelope::document()` even measured *faster*
+than the old struct. That check was run outside Docker, in this session's
+own sandboxed execution environment, which turned out to be a poor proxy:
+re-run inside Docker (this project's own canonical environment), the same
+construction-only comparison flips hard, consistently across four runs:
+
+```
+ra_common::Envelope::document()+content   ~710-810k constructions/sec
+seda_bus::Envelope::new() (old struct)    ~2.3-2.4M constructions/sec
+```
+
+`ra_common`'s construction is **~2.9-3.4x more expensive**, not faster —
+`Uuid::new_v4()` isn't the cost (isolated: ~2M/sec, plenty fast); it's the
+cumulative weight of `Did::default()`, a headers `Map::new()`, a
+`DocumentMessage`'s `Vec<Map>`, and — every publish — `ra_common`'s
+`DynamicRoutingSlip::next_route()` boxing the popped `Route` on the heap.
+The old struct's `to: String` + `VecDeque<String>` slip needed none of
+that. That gap shows up end-to-end: rewired `seq` throughput is 208,568
+eps versus the pre-rewire 469,164 (0.44x), `par` 516,836 versus 719,627
+(0.72x), `chan` 1,075,379 versus 2,725,588 (0.39x) — a real, consistent,
+Docker-verified cost, most pronounced exactly where construction cost sits
+most directly on the critical path (`seq`, `chan`'s many independent
+low-contention channels) and least pronounced where lock contention
+already dominates (`par`).
+
+**So: rewiring is not "just code" here — it has a real, now-measured
+throughput cost**, because `ra_common::Envelope` does more per envelope
+than a bus-specific minimal struct needs to. That's the same tradeoff
+every other `ra_common`-carrying port already made (see "Reading this
+table honestly" below for how that reframes the whole table); Rust is now
+consistent with the rest of the ecosystem instead of the one outlier, at
+the price this comparison exists to make visible.
+
 ## Mutex vs. lock-free: why the design is what it is
 
 `par`'s ceiling — real in every language, not just C++ — comes from a
@@ -254,11 +319,11 @@ columns.
 
 |                                   |              Java |        Rust |               Python |         TypeScript |                                        C++ |                  C# |                                       Go |
 |-----------------------------------|------------------:|------------:|---------------------:|-------------------:|-------------------------------------------:|--------------------:|-----------------------------------------:|
-| Version                           |             1.3.1 |       0.3.0 |                0.2.0 |              0.2.0 |                                      0.1.0 |               0.1.0 |                                    0.1.0 |
-| Source LOC                        |               962 |         718 |                  595 |                835 |                                        744 |                 620 |                                      739 |
+| Version                           |             1.3.1 |       0.4.0 |                0.2.0 |              0.2.0 |                                      0.1.0 |               0.1.0 |                                    0.1.0 |
+| Source LOC                        |               962 |         743 |                  595 |                835 |                                        744 |                 620 |                                      739 |
 | Integration tests                 |                 8 |           9 |                   11 |                 16 |                                         13 |                  13 |                                       13 |
 | Runtime deps beyond `ra-common-*` |                 0 |       `log` |                    0 |                  0 |                                          0 |                   0 |                                        0 |
-| Envelope source                   |       `ra-common` |  own struct |          `ra-common` |        `ra-common` |                            `ra-common-cpp` |      `ra-common-cs` |                           `ra-common-go` |
+| Envelope source                   |       `ra-common` | `ra-common` |          `ra-common` |        `ra-common` |                            `ra-common-cpp` |      `ra-common-cs` |                           `ra-common-go` |
 | Worker pool                       | `ExecutorService` | hand-rolled | `ThreadPoolExecutor` |         event loop |                                hand-rolled | shared `ThreadPool` |                        none (goroutines) |
 | True stage parallelism            |               yes |         yes |   only free-threaded | worker stages only |                                        yes |                 yes |                                      yes |
 | Race/sanitizer-verified           |           not run |     not run |              not run |            not run | attempted, untrustworthy (TSan, sandboxed) |             not run | **yes** (`go test -race`, clean, 5 runs) |
@@ -269,47 +334,33 @@ Source LOC: `wc -l` over each port's library source only — see
 
 ## Reading this table honestly
 
-Rust and Go's `chan` numbers being 5-6x, well ahead of Java/C#'s 2.6-2.8x,
+Rust and Go's `chan` numbers being 5-8x, well ahead of Java/C#'s 2.6-2.9x,
 is a real, structural result (both compile to native code with real OS
-threads and no GC pause risk). Within the six `ra-common`-carrying
+threads and no GC pause risk). Within the `ra-common`-carrying
 implementations, don't read close percentage differences between adjacent
 rows as meaningful given three trials on a single host; do read
 order-of-magnitude differences, `par`-vs-`chan` gaps, and collapses as
 real — every one reported here was independently checked against a clean,
 isolated measurement, not assumed from a single run.
 
-**A previous version of this section claimed part of Rust's lead came from
-`seda-bus-rust` being the one port never rewired onto `ra-common`'s
-`Envelope`** — own minimal struct, presumed cheaper than `ra-common`'s
-heavier one with its routing slip, `Did`, headers map, and document tree.
-That claim was never actually measured, and when it was — a user pushed
-back with "it's just code," which is exactly the kind of specific
-skepticism this report exists to check — it turned out backwards. An
-isolated construction benchmark (200,000 iterations, same 4-byte payload,
-no bus involved, the same isolation technique used to catch both real C++
-bugs above) showed `ra-common-rust`'s `Envelope::document()` + `add_content`
-building **~800-860k envelopes/sec, actually faster than `seda-bus-rust`'s
-own `Envelope::new()` at ~700-705k/sec** — consistent across five runs.
-Two concrete reasons: `seda-bus-rust`'s own id generator calls
-`SystemTime::now()` (a syscall) and then hex-formats a `u128` into a
-heap-allocated `String`, while `ra-common-rust`'s `Uuid::new_v4()` is one
-`getrandom` syscall plus simpler fixed-width formatting — cheaper in
-practice, not more expensive; and `ra-common-rust`'s `Route` clones via a
-plain `#[derive(Clone)]`, not the JSON-serialize-and-reparse round trip
-that was specific to C++'s `unique_ptr`-based ownership model (bug 2
-above) — Rust never had that problem to begin with.
-
-**So: no evidence that rewiring `seda-bus-rust` onto `ra-common-rust` would
-cost throughput** — if anything, this isolated result points the other
-way. This is construction-only, not a full rewired end-to-end benchmark
-(a real rewire could still surface something this micro-benchmark can't
-see), so it's not proof the two are equivalent — but the specific claim
-that `seda-bus-rust`'s own envelope is a source of its throughput lead
-is retracted, not just softened. Rust being the one port not built on
-`ra-common` remains true and worth knowing as an ecosystem fact (see
-`seda-bus/DESIGN.md`); it just isn't established to be a *performance*
-advantage, which is the distinction the earlier version of this section
-blurred.
+**This section previously carried a claim, then a retraction, about
+whether Rust's own envelope mattered — both were wrong in the same way:
+checked once, outside this project's own canonical environment, and
+trusted too soon.** The first draft asserted (unmeasured) that
+`seda-bus-rust`'s minimal struct explained part of its lead. Challenged
+directly — "it's just code" — a construction-only micro-benchmark said no,
+`ra_common`'s construction was if anything *faster*, and the claim was
+retracted. That micro-benchmark ran natively, in this session's own
+sandboxed shell, not in Docker; re-run inside Docker, the result reversed
+completely (`ra_common` construction ~2.9-3.4x *more* expensive,
+consistent across four runs — see "Rust: the `ra-common` rewire" above)
+and the full rewired bus confirmed it end-to-end. The lesson generalizes
+past Rust: a "verified" result is only as trustworthy as the environment
+it was verified in, and this report's own native-vs-Docker gap (already
+documented for C++'s `par` collapse) applies to *any* number measured
+outside Docker here, not just throughput — this session just hadn't hit
+it on a construction micro-benchmark until now. Every environment-crossing
+claim from here forward gets checked in Docker before being trusted.
 
 The same applies to the latency table: read the multi-second `seq`/`par`
 numbers for TS/Python as a real backlog finding (order-of-magnitude, and

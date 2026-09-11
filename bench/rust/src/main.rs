@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use seda_bus::{Bus, ChannelConfig, Envelope};
+use seda_bus::ra_common::serde_json::Value;
+use seda_bus::{envelope_payload, make_envelope, Bus, ChannelConfig, Envelope};
 
 const TOTAL: usize = 200_000;
 const TRIALS: usize = 3;
@@ -80,7 +81,7 @@ fn run_shared(config: &'static str, producers: usize) -> RunResult {
         let latencies = Arc::clone(&latencies);
         bus.subscribe("bench", move |env: &mut Envelope| {
             let t1 = now_nanos(ref_t);
-            let t0 = u64::from_le_bytes(env.payload[..8].try_into().unwrap());
+            let t0 = envelope_payload(env).and_then(Value::as_u64).unwrap();
             let idx = count.fetch_add(1, Ordering::Relaxed) as usize;
             latencies[idx].store(t1.saturating_sub(t0), Ordering::Relaxed);
             true
@@ -98,7 +99,7 @@ fn run_shared(config: &'static str, producers: usize) -> RunResult {
         handles.push(thread::spawn(move || {
             for _ in 0..n {
                 bus.publish(
-                    Envelope::new("bench", now_nanos(ref_t).to_le_bytes().to_vec()),
+                    make_envelope("bench", Some(Value::from(now_nanos(ref_t))), []),
                     Some(Duration::from_secs(5)),
                 );
             }
@@ -154,7 +155,7 @@ fn run_independent_channels(producers: usize) -> RunResult {
         let lat = Arc::clone(&latencies[c]);
         bus.subscribe(&name, move |env: &mut Envelope| {
             let t1 = now_nanos(ref_t);
-            let t0 = u64::from_le_bytes(env.payload[..8].try_into().unwrap());
+            let t0 = envelope_payload(env).and_then(Value::as_u64).unwrap();
             let idx = count.fetch_add(1, Ordering::Relaxed) as usize; // only this channel's own drain touches it
             lat[idx].store(t1.saturating_sub(t0), Ordering::Relaxed);
             true
@@ -170,7 +171,7 @@ fn run_independent_channels(producers: usize) -> RunResult {
         handles.push(thread::spawn(move || {
             for _ in 0..n {
                 bus.publish(
-                    Envelope::new(name.clone(), now_nanos(ref_t).to_le_bytes().to_vec()),
+                    make_envelope(name.clone(), Some(Value::from(now_nanos(ref_t))), []),
                     Some(Duration::from_secs(5)),
                 );
             }

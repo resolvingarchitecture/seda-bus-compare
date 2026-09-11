@@ -29,7 +29,7 @@ envelopes/trial, 3 trials/config, all envelopes/sec.
 
 | Implementation               |     seq |     par | par vs. seq |          chan | chan vs. seq |
 |------------------------------|--------:|--------:|------------:|--------------:|-------------:|
-| Rust                         | 469,164 | 719,627 |       1.53x | **2,725,588** |    **5.81x** |
+| Rust                         | 208,568 | 516,836 |       2.48x | **1,075,379** |        5.16x |
 | Go                           | 116,026 | 298,989 |       2.58x |       989,465 |    **8.53x** |
 | Java                         | 307,890 | 543,493 |       1.77x |       903,183 |        2.93x |
 | C++                          | 124,811 |  58,379 |   **0.47x** |       632,414 |        5.07x |
@@ -48,9 +48,9 @@ invisible in the throughput table above:
 
 | Implementation    | Config |        p50 (us) |     p99 (us) |    p999 (us) |     max (us) |
 |-------------------|--------|----------------:|-------------:|-------------:|-------------:|
-| Rust              | seq    |             9.8 |        771.0 |      1,116.8 |      2,210.6 |
-| Rust              | par    |            43.0 |      1,867.6 |      2,419.8 |      5,451.7 |
-| Rust              | chan   |         3,467.9 |     13,660.0 |     14,407.2 |     15,286.4 |
+| Rust              | seq    | 127,088.2 (noisy)† |  243,387.0 |    245,277.2 |    291,585.8 |
+| Rust              | par    |            62.0 |      5,496.6 |      7,079.5 |     11,430.8 |
+| Rust              | chan   |        22,022.1 |     52,850.4 |     55,073.8 |     63,226.8 |
 | Go                | seq    |           618.9 |      5,150.4 |      7,194.9 |      8,569.6 |
 | Go                | par    |         2,756.1 |     10,660.9 |     11,799.1 |     19,957.1 |
 | Go                | chan   |         8,855.6 |     37,160.2 |     42,722.5 |     47,050.7 |
@@ -74,6 +74,11 @@ invisible in the throughput table above:
 | Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
 
 ![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
+
+† Rust's `seq` latency is unreliable on the host this was measured on
+(real scheduling stalls hitting `seq`'s single-consumer design) — see
+`RESULTS.md`'s "Latency" section for the mechanism. Its throughput numbers
+above are unaffected.
 
 ## Reproducing this
 
@@ -115,8 +120,9 @@ setup.sh            verifies/clones the sibling repos this depends on
 
 ## What this found
 
-Building this surfaced three real bugs and one real methodology failure —
-not just numbers.
+Building this surfaced three real C++ bugs, a real throughput cost from
+rewiring Rust onto `ra-common`, and one real methodology failure — not
+just numbers.
 
 The first full run reported Rust's `par` as flat and explained why with a
 plausible-sounding theory. The theory was wrong, because the number was
@@ -156,3 +162,12 @@ builds for the whole run — while every compiled, natively-multithreaded
 implementation stays in the microseconds-to-low-milliseconds range in the
 same configs. `chan` fixes most of it, most dramatically for free-threaded
 Python (a >1000x drop in `p50`). See `RESULTS.md`'s "Latency" section.
+
+`seda-bus-rust` was the one port never built on `ra-common` — its own
+minimal envelope instead of the shared one every other port carries.
+Rewired onto `ra-common-rust` and measured: throughput dropped 0.39-0.72x
+across configs, because `ra_common::Envelope` does ~3x more work per
+construction (a routing-slip heap allocation, an identity struct, a
+headers map, a document tree) than a bus-specific 7-field struct needs to.
+Rust is now consistent with the rest of the ecosystem instead of the one
+outlier. See `RESULTS.md`'s "Rust: the `ra-common` rewire" section.
