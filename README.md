@@ -91,7 +91,9 @@ Rust's `seq` still carries a real, unresolved tail-latency stall
 (`p50` fine, `max` still reaches 63ms) — previously attributed to the
 `ra_common` rewire via an A/B test that itself predates this pass's
 construction-exclusion fix, so that causal claim is flagged as open, not
-re-confirmed. Full detail in `RESULTS.md`.
+re-confirmed. Full detail in `RESULTS.md`, including an "Every anomaly,
+explained" section walking through each surprising number in both tables
+above individually, not just the headline findings.
 
 ## Reproducing this
 
