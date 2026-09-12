@@ -13,6 +13,22 @@ application would see (a real consumer does real work) — it isolates the
 one thing this benchmark can compare fairly across seven very different
 runtimes: the cost of the staging machinery itself.
 
+**Envelope construction is deliberately excluded from the timed window.**
+Every envelope is built (routing slip, headers, the works) in an untimed
+warm-up phase before the clock starts; the timed producer loop only sets
+the publish-time payload on an already-built envelope and calls `Publish`.
+A real producer already holds a constructed envelope before it ever calls
+the bus — building the envelope is the caller's cost, not the bus's, and
+folding it into the timed window means measuring "how fast can this
+language build a `ra-common`-shaped object," not "how fast is this bus."
+This was not the original design: an earlier version of this benchmark
+timed `make_envelope(...)` *and* `Publish` together in the same loop, which
+silently mixed the two costs into every number in this report and
+materially changed at least one finding (see `RESULTS.md`'s "Rust: the
+`ra-common` rewire" for the concrete before/after). Caught directly ("we're
+not measuring the ability of this code to create an Envelope"), not
+self-discovered.
+
 ## The channel(s)
 
 - `seq`/`par`: one channel, name `bench`. `chan`: `P` channels, named
@@ -68,17 +84,22 @@ qualitatively.
 - Publish with a generous per-publish timeout (5s) — long enough that a
   slow implementation never spuriously fails a publish, short enough that a
   genuine deadlock surfaces as a failed run rather than hanging forever.
-- Publish envelope payload: **a monotonic-clock timestamp, taken
-  immediately before `Publish`, in that language's own native
-  representation** (e.g. `steady_clock::now()` ticks in C++, `nanoTime()`
-  in Java, `perf_counter_ns()` in Python) — see "Latency" below. This
-  replaced an earlier version of this spec where the payload was a plain
-  unread integer; embedding the publish time and reading it back in the
-  consumer is what latency measurement needs, and it's a small, equally-
-  shaped cost in every language (one clock read on publish, one on
-  delivery, one array write), so it doesn't bias throughput comparisons
-  between languages even though it does add a small constant tax to all of
-  them versus the pre-latency numbers.
+- Every envelope is fully constructed (routing included) in an untimed
+  warm-up phase before the clock starts — one `Vec`/array/list per producer
+  thread, handed off to that thread before `start := now()`. See "What it
+  measures" above for why.
+- Publish envelope payload: **a monotonic-clock timestamp, set on the
+  already-built envelope immediately before `Publish`, in that language's
+  own native representation** (e.g. `steady_clock::now()` ticks in C++,
+  `nanoTime()` in Java, `perf_counter_ns()` in Python) via that port's
+  `set_payload`/`SetPayload`/`add_content`-equivalent (a single field
+  write, not a reconstruction) — see "Latency" below. Embedding the publish
+  time and reading it back in the consumer is what latency measurement
+  needs, and it's a small, equally-shaped cost in every language (one clock
+  read on publish, one on delivery, one array write, one field write), so
+  it doesn't bias throughput comparisons between languages even though it
+  does add a small constant tax to all of them versus a version with no
+  latency measurement at all.
 - Timing window: wall-clock from immediately before the first `Publish`
   call to the bus reporting a full drain (`Shutdown` with a generous
   timeout — 60s — returning "drained"). A run whose `Shutdown` does not
@@ -149,8 +170,12 @@ trial's latency percentiles in microseconds:
 
 ## What this deliberately does not measure
 
-Startup/JIT-warmup cost (the timing window starts after the bus and channel
-are constructed), memory footprint, or anything under real contention with
+Envelope/message construction cost (excluded from the timed window as of
+this pass — see "What it measures" above; it's measured separately, once,
+as a dedicated construction-only micro-benchmark where that number matters
+on its own), startup/JIT-warmup cost (the timing window starts after the
+bus and channel are constructed), memory footprint, or anything under real
+contention with
 other stages — multi-stage/routing-slip itineraries, back-pressure, retry,
 and dead-letter are already covered functionally by each port's own test
 suite, not by this benchmark. See `METHODOLOGY.md` for the full list of

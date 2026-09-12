@@ -20,65 +20,78 @@ dependencies, envelope source, and more).
 ## Results at a glance
 
 Full narrative in [`RESULTS.md`](RESULTS.md); read
-[`METHODOLOGY.md`](METHODOLOGY.md) first — the first pass at these numbers
-was wrong (a contaminated host, caught and corrected) and these are
-directional, not authoritative. `seq` = 1 producer/1 channel;
-`par` = 8 producers sharing 1 channel (lock contention); `chan` = 8
-producers, 8 independent channels (real parallel capacity). 200,000
-envelopes/trial, 3 trials/config, all envelopes/sec.
+[`METHODOLOGY.md`](METHODOLOGY.md) first — this report has been
+substantially corrected twice by direct, specific pushback (a contaminated
+host, then envelope construction cost silently folded into every "bus
+overhead" number), and these are directional, not authoritative. `seq` = 1
+producer/1 channel; `par` = 8 producers sharing 1 channel (lock
+contention); `chan` = 8 producers, 8 independent channels (real parallel
+capacity). 200,000 envelopes/trial, 3 trials/config, envelope construction
+excluded from the timed window (see "What this found" below), all numbers
+envelopes/sec.
 
-| Implementation               |     seq |     par | par vs. seq |          chan | chan vs. seq |
-|------------------------------|--------:|--------:|------------:|--------------:|-------------:|
-| Rust                         | 208,568 | 516,836 |       2.48x | **1,075,379** |        5.16x |
-| Go                           | 116,026 | 298,989 |       2.58x |       989,465 |    **8.53x** |
-| Java                         | 307,890 | 543,493 |       1.77x |       903,183 |        2.93x |
-| C++                          | 124,811 |  58,379 |   **0.47x** |       632,414 |        5.07x |
-| C#                           | 158,952 | 282,073 |       1.77x |       420,814 |        2.65x |
-| Python 3.14t (free-threaded) |  33,258 |  31,930 |       0.96x |        91,537 |        2.75x |
-| TypeScript (Node 22)         |  16,344 |  16,577 |       1.01x |        51,407 |        3.15x |
-| Python 3.13 (GIL)            |  35,892 |  10,958 |   **0.31x** |        11,959 |        0.33x |
+| Implementation                | seq     | par     | par vs. seq |          chan | chan vs. seq |
+|--------------------------------|--------:|--------:|------------:|--------------:|-------------:|
+| Java                           | 861,490 | 556,566 |       0.65x | **1,968,262** |        2.28x |
+| Go                             | 408,140 | 412,299 |       1.01x |     1,759,884 |        4.31x |
+| Rust                           | 544,162 | 459,738 |       0.84x |       645,609 |        1.19x |
+| C#                             | 272,740 | 273,234 |       1.00x |       387,930 |        1.42x |
+| C++                            | 175,861 |  68,998 |   **0.39x** |       379,529 |        2.16x |
+| Python 3.14t (free-threaded)   | 102,173 |  45,909 |       0.45x |       260,058 |        2.55x |
+| TypeScript (Node 22)           |  21,619 |  14,436 |       0.67x |       124,338 |    **5.75x** |
+| Python 3.13 (GIL)              |  53,148 |  36,206 |       0.68x |        35,660 |    **0.67x** |
 
 ![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
 
 Latency (`p50`/`p99`/`p999`/`max`, microseconds) tells a different story —
 it's queueing delay under a producer/consumer rate mismatch, not raw
-dispatch cost (`bench/WORKLOAD.md` explains why), and it's what actually
-exposes TypeScript's and Python's multi-*second* backlogs under `seq`/`par`,
-invisible in the throughput table above:
+dispatch cost (`bench/WORKLOAD.md` explains why). **This pass's central
+finding: once producers aren't artificially throttled by construction
+cost, several "compiled, natively-multithreaded" implementations show a
+real, sustained backlog, including in `chan`** — the configuration this
+report previously held up as having no artificial contention point left to
+hide behind. That overturns this report's own earlier claim that compiled
+languages never show this pattern. See `RESULTS.md`'s "Latency" section for
+the full clean/tail-stall/backlog classification, table, and per-language
+detail — it's long, and worth reading in full rather than summarized here.
 
-| Implementation    | Config |        p50 (us) |     p99 (us) |    p999 (us) |     max (us) |
-|-------------------|--------|----------------:|-------------:|-------------:|-------------:|
-| Rust              | seq    | 127,088.2 (noisy)† |  243,387.0 |    245,277.2 |    291,585.8 |
-| Rust              | par    |            62.0 |      5,496.6 |      7,079.5 |     11,430.8 |
-| Rust              | chan   |        22,022.1 |     52,850.4 |     55,073.8 |     63,226.8 |
-| Go                | seq    |           618.9 |      5,150.4 |      7,194.9 |      8,569.6 |
-| Go                | par    |         2,756.1 |     10,660.9 |     11,799.1 |     19,957.1 |
-| Go                | chan   |         8,855.6 |     37,160.2 |     42,722.5 |     47,050.7 |
-| Java              | seq    |             6.3 |         30.5 |         90.9 |      3,583.0 |
-| Java              | par    |            12.3 |      1,137.9 |      2,027.3 |      4,001.0 |
-| Java              | chan   |            10.8 |      1,611.8 |      2,913.2 |      6,004.8 |
-| C++               | seq    |            30.9 |      2,419.7 |      3,316.1 |      6,444.7 |
-| C++               | par    |            16.6 |        118.7 |        508.2 |      2,161.6 |
-| C++               | chan   |         7,466.9 |     36,392.1 |     39,156.6 |     42,607.2 |
-| C#                | seq    |             6.2 |         75.8 |      2,039.1 |     37,001.5 |
-| C#                | par    |            10.2 |        122.4 |      1,595.7 |     12,550.3 |
-| C#                | chan   |            11.9 |        435.9 |      2,901.8 |      9,638.3 |
-| Python 3.14t      | seq    |            41.5 |     10,141.1 |     15,607.1 |     43,090.2 |
-| Python 3.14t      | par    | **1,214,855.4** |  2,019,934.4 |  2,024,248.2 |  2,163,819.5 |
-| Python 3.14t      | chan   |         1,159.9 |     32,746.1 |     44,886.0 |     58,822.5 |
-| TypeScript        | seq    | **5,868,878.1** |  7,097,218.5 |  7,100,861.2 |  7,138,256.1 |
-| TypeScript        | par    | **5,802,716.0** |  7,023,989.9 |  7,033,335.5 |  7,138,062.2 |
-| TypeScript        | chan   |     1,516,281.1 |  1,884,631.7 |  1,890,423.6 |  1,948,672.1 |
-| Python 3.13 (GIL) | seq    |        18,531.7 |     87,611.4 |    102,829.6 |    136,593.7 |
-| Python 3.13 (GIL) | par    | **8,732,330.5** | 12,962,985.8 | 13,036,713.4 | 13,510,741.4 |
-| Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
+| Implementation    | Config |         p50 (us) |       p99 (us) |      p999 (us) |       max (us) |
+|-------------------|--------|------------------:|----------------:|----------------:|----------------:|
+| Java               | seq    |          12,301.0 |         18,253.4 |         18,650.2 |         26,527.6 |
+| Java               | par    |           1,123.9 |          5,204.0 |          5,602.3 |          9,468.1 |
+| Java               | chan   |          18,523.3 |         34,827.7 |         35,903.5 |         61,895.7 |
+| Go                 | seq    |         172,144.8 |        252,232.7 |        253,427.0 |        299,153.7 |
+| Go                 | par    |          53,172.8 |         88,893.3 |         89,190.0 |        102,887.4 |
+| Go                 | chan   |          38,795.9 |         68,700.5 |         70,759.2 |         75,217.7 |
+| Rust               | seq    |           3,597.4 |         44,018.3 |         44,556.3 |         63,028.0 |
+| Rust               | par    |              61.1 |         66,075.7 |         67,513.4 |         70,363.9 |
+| Rust               | chan   |         114,914.7 |        200,077.4 |        208,652.1 |        227,169.6 |
+| C#                 | seq    |         197,274.0 |        312,282.7 |        314,225.8 |        439,031.3 |
+| C#                 | par    |              15.8 |          1,805.3 |         35,645.0 |         79,071.4 |
+| C#                 | chan   |           2,975.3 |        129,019.4 |        133,993.6 |        184,477.5 |
+| C++                | seq    |              21.6 |            200.1 |            518.4 |         11,358.6 |
+| C++                | par    |              13.6 |        153,688.0 |        155,973.3 |        161,260.6 |
+| C++                | chan   |          58,806.7 |        234,509.3 |        295,332.8 |        322,910.3 |
+| Python 3.14t       | seq    |         272,012.2 |        403,180.6 |        405,352.4 |        461,979.2 |
+| Python 3.14t       | par    |       1,145,814.6 |      1,563,480.1 |      1,567,483.2 |      1,604,400.9 |
+| Python 3.14t       | chan   |         173,936.8 |        336,498.2 |        338,502.5 |        360,242.7 |
+| TypeScript         | seq    |       4,417,982.2 |      6,218,729.6 |      6,228,380.5 |      6,329,220.6 |
+| TypeScript         | par    |       6,656,120.5 |      9,436,286.4 |      9,438,434.9 |      9,537,606.6 |
+| TypeScript         | chan   |         600,404.0 |      1,076,210.8 |      1,077,789.3 |      1,183,206.8 |
+| Python 3.13 (GIL)  | seq    |         581,421.6 |        950,212.9 |        955,746.0 |      1,210,851.6 |
+| Python 3.13 (GIL)  | par    |       1,950,780.8 |      2,906,951.6 |      2,923,365.2 |      3,525,135.9 |
+| Python 3.13 (GIL)  | chan   |       2,783,704.1 |      4,549,412.7 |      4,624,846.8 |      4,892,312.0 |
 
 ![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
 
-† Rust's `seq` latency is unreliable on the host this was measured on
-(real scheduling stalls hitting `seq`'s single-consumer design) — see
-`RESULTS.md`'s "Latency" section for the mechanism. Its throughput numbers
-above are unaffected.
+Only C++'s `seq`/`par` are genuinely clean (consumer always keeps pace);
+everything else shows at least a tail-only stall, and most show a real,
+sustained backlog once a fast-enough producer can outrun its consumer.
+Rust's `seq` still carries a real, unresolved tail-latency stall
+(`p50` fine, `max` still reaches 63ms) — previously attributed to the
+`ra_common` rewire via an A/B test that itself predates this pass's
+construction-exclusion fix, so that causal claim is flagged as open, not
+re-confirmed. Full detail in `RESULTS.md`.
 
 ## Reproducing this
 
@@ -98,7 +111,11 @@ Every language builds inside its own Docker container with a pinned base
 image — see `bench/<lang>/Dockerfile` — so results don't depend on whatever
 happens to already be installed on the machine running this. See
 `METHODOLOGY.md` for why that matters here specifically (none of
-`ra-common-*`/`seda-bus-*` are published to a package registry).
+`ra-common-*`/`seda-bus-*` are published to a package registry). Verify the
+Docker Desktop VM is actually idle before trusting a run — `docker ps -q`
+showing zero containers is not sufficient on its own; see `RESULTS.md`'s
+"A note on host quietness" for what caught this pass's host contamination
+and how it was confirmed resolved.
 
 ## Structure
 
@@ -120,54 +137,45 @@ setup.sh            verifies/clones the sibling repos this depends on
 
 ## What this found
 
-Building this surfaced three real C++ bugs, a real throughput cost from
-rewiring Rust onto `ra-common`, and one real methodology failure — not
-just numbers.
+Building this surfaced three real C++ construction-time bugs, a real
+methodology failure around a contaminated host, and — the biggest one —
+a second real methodology failure: envelope *construction* was folded into
+every "bus overhead" number in this report until a direct, specific
+challenge caught it (*"we're not measuring the ability of this code to
+create an Envelope"*). Fixing that reshuffled the entire throughput ranking
+(Java now leads, not Rust) and overturned this report's own standing claim
+that compiled languages never show backlog under `seq`/`par`/`chan` — they
+do, several of them, once a producer isn't artificially throttled by how
+long its own envelope takes to build. See `RESULTS.md`'s "Latency" section
+for the corrected finding and the clean/tail-stall/backlog classification
+that replaces it.
 
-The first full run reported Rust's `par` as flat and explained why with a
-plausible-sounding theory. The theory was wrong, because the number was
-wrong: the host was running concurrent Docker builds during the timed run.
-Caught by direct pushback, confirmed with a clean isolated rerun, and fixed
-by redoing the entire benchmark with nothing else executing concurrently —
-see `METHODOLOGY.md`'s "A contaminated first run" section for the whole
-story, including the exact numbers that didn't add up.
+Separately, still true: the benchmark's `par` config (many producers on one
+shared channel) measures lock contention, not parallel capacity, and
+`chan` (independent channels, one per producer) was added specifically to
+answer "does parallelism actually work here" — it does, substantially, for
+every implementation except GIL-bound Python. The first full run also
+reported Rust's `par` as flat due to a contaminated host running concurrent
+Docker builds during the timed window; caught by direct pushback, fixed by
+rerunning with nothing else executing. Both are historical corrections,
+independent of this pass's construction-exclusion fix — see
+`METHODOLOGY.md` for the full story on each.
 
-Separately, real: the first C++ run was 20-30x slower than Rust for
-identical work. Traced to `ra-common-cpp` reopening `/dev/urandom` on every
-random-byte call (fixed, commit `8700729`), then, after an isolated
-micro-benchmark showed envelope construction alone was 9x faster than the
-full bus path, to `Envelope::GetRoute()` cloning routes via a JSON
-serialize/re-parse round trip instead of a proper clone (fixed, commit
-`7e5717b`). A third bug — a single process-wide mutex still guarding the
-(by-then already fixed) `/dev/urandom` handle, serializing every thread
-regardless of channel — capped C++'s independent-channel scaling at 1.42x
-versus Rust/Go's 5-6x; fixed by switching to `getentropy(2)`, a direct
-syscall needing no shared state or lock (commit `1b3f687`), which took
-`chan` to 5.29x.
+C++'s first run was 20-30x slower than Rust for identical work, traced to
+three real bugs in `ra-common-cpp`'s random-byte/route-clone construction
+path (commits `8700729`, `7e5717b`, `1b3f687`) — all genuine fixes, but all
+construction-time costs that this benchmark's timed window no longer
+includes by design, so their dramatic before/after numbers are preserved
+as history in `RESULTS.md`, not reproducible on this page anymore.
 
-The biggest structural finding: the benchmark's original `par` config (many
-producers on one shared channel) measures lock contention, not parallel
-capacity, and conflating the two was this report's own methodology gap. A
-third configuration, `chan` (independent channels, one per producer), was
-added specifically to answer "does parallelism actually work here" — and it
-does, substantially, for every implementation except GIL-bound Python. See
-`RESULTS.md` and `METHODOLOGY.md`'s "Does parallelism work?" section for
-the controlled proof.
-
-Throughput alone also turned out to hide a real finding: adding per-
-envelope latency percentiles (`p50`/`p99`/`p999`/`max`) surfaced that
-TypeScript's and Python's `seq`/`par` configs carry multi-*second* queueing
-delays — the consumer can't keep pace with its producer, so a backlog
-builds for the whole run — while every compiled, natively-multithreaded
-implementation stays in the microseconds-to-low-milliseconds range in the
-same configs. `chan` fixes most of it, most dramatically for free-threaded
-Python (a >1000x drop in `p50`). See `RESULTS.md`'s "Latency" section.
-
-`seda-bus-rust` was the one port never built on `ra-common` — its own
-minimal envelope instead of the shared one every other port carries.
-Rewired onto `ra-common-rust` and measured: throughput dropped 0.39-0.72x
-across configs, because `ra_common::Envelope` does ~3x more work per
-construction (a routing-slip heap allocation, an identity struct, a
-headers map, a document tree) than a bus-specific 7-field struct needs to.
-Rust is now consistent with the rest of the ecosystem instead of the one
-outlier. See `RESULTS.md`'s "Rust: the `ra-common` rewire" section.
+`seda-bus-rust` was the one port never built on `ra-common` until an
+earlier pass rewired it onto `ra_common::Envelope` and measured a real
+throughput cost from doing so. That conclusion is now revisited: this
+pass's construction-excluded `seq` throughput (544,162 eps) is *higher*
+than the old pre-rewire, construction-inclusive number (469,164) — hard to
+reconcile with "the rewire has an ongoing dispatch-time cost." The likely
+correct reading is that most of the previously-measured cost was
+construction cost, now properly excluded, not a genuine per-envelope
+dispatch tax — flagged as needing a fresh A/B test to confirm, not
+asserted as settled. See `RESULTS.md`'s "Rust: the `ra-common` rewire,
+revisited" section.

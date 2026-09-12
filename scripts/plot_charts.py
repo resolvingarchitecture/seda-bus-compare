@@ -21,11 +21,11 @@ CHARTS_DIR = COMPARE_DIR / "results" / "charts"
 # variant (as it appears in summary.csv) -> display label, in the same order
 # as RESULTS.md's tables (ranked by chan throughput, matching aggregate.py).
 LABELS = {
-    "rust": "Rust",
-    "go": "Go",
     "java": "Java",
-    "cpp": "C++",
+    "go": "Go",
+    "rust": "Rust",
     "cs": "C#",
+    "cpp": "C++",
     "python 3.14.0 (free-threaded)": "Python 3.14t",
     "ts": "TypeScript",
     "python 3.13.15 (GIL)": "Python 3.13 (GIL)",

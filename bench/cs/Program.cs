@@ -5,11 +5,27 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using Ra.Common;
 using Ra.SedaBus;
 using static Ra.SedaBus.EnvelopeHelpers;
 
 const int Total = 200_000;
 const int Trials = 3;
+
+// Pre-building Total envelopes is itself a burst of allocation right before
+// the timed window starts; without a settle pause + explicit GC, a
+// collection provoked by that burst can land inside the first few timed
+// publishes instead (caught happening - inconsistently, across several
+// languages - the first time this benchmark measured envelope construction
+// separately from dispatch). See ../WORKLOAD.md.
+const int SettleMs = 200;
+
+void Settle()
+{
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    Thread.Sleep(SettleMs);
+}
 
 var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
@@ -52,14 +68,33 @@ Result RunShared(string config, int producers)
     int perProducer = Total / producers;
     int remainder = Total - perProducer * producers;
 
+    // Pre-build every envelope before the timed window starts - this
+    // benchmark measures bus dispatch/queueing overhead, not envelope
+    // construction cost. In production the producer already holds a
+    // constructed envelope before it ever calls publish(). See
+    // ../WORKLOAD.md.
+    var perProducerEnvelopes = new List<Envelope>[producers];
+    for (int p = 0; p < producers; p++)
+    {
+        int n = perProducer + (p == 0 ? remainder : 0);
+        var envs = new List<Envelope>(n);
+        for (int i = 0; i < n; i++) envs.Add(MakeEnvelope("bench", 0L));
+        perProducerEnvelopes[p] = envs;
+    }
+
+    Settle();
     var sw = Stopwatch.StartNew();
     var threads = new List<Thread>();
     for (int p = 0; p < producers; p++)
     {
-        int n = perProducer + (p == 0 ? remainder : 0);
+        var envs = perProducerEnvelopes[p];
         var t = new Thread(() =>
         {
-            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope("bench", Stopwatch.GetTimestamp()), timeout);
+            foreach (var env in envs)
+            {
+                SetPayload(env, Stopwatch.GetTimestamp());
+                bus.Publish(env, timeout);
+            }
         });
         threads.Add(t);
         t.Start();
@@ -102,16 +137,32 @@ Result RunIndependentChannels(int producers)
         });
     }
 
-    var timeout = TimeSpan.FromSeconds(5);
-    var sw = Stopwatch.StartNew();
-    var threads = new List<Thread>();
+    // Pre-build every envelope before the timed window starts - see the
+    // comment in RunShared.
+    var perChannelEnvelopes = new List<Envelope>[producers];
     for (int c = 0; c < producers; c++)
     {
         string name = $"bench{c}";
         int n = perChannel + (c == 0 ? remainder : 0);
+        var envs = new List<Envelope>(n);
+        for (int i = 0; i < n; i++) envs.Add(MakeEnvelope(name, 0L));
+        perChannelEnvelopes[c] = envs;
+    }
+
+    var timeout = TimeSpan.FromSeconds(5);
+    Settle();
+    var sw = Stopwatch.StartNew();
+    var threads = new List<Thread>();
+    for (int c = 0; c < producers; c++)
+    {
+        var envs = perChannelEnvelopes[c];
         var t = new Thread(() =>
         {
-            for (int i = 0; i < n; i++) bus.Publish(MakeEnvelope(name, Stopwatch.GetTimestamp()), timeout);
+            foreach (var env in envs)
+            {
+                SetPayload(env, Stopwatch.GetTimestamp());
+                bus.Publish(env, timeout);
+            }
         });
         threads.Add(t);
         t.Start();

@@ -18,6 +18,14 @@ using namespace std::chrono;
 constexpr int kTotal = 200000;
 constexpr int kTrials = 3;
 
+// Pre-building kTotal envelopes is itself a burst of allocation right
+// before the timed window starts; without a settle pause the allocator/OS
+// memory state that burst leaves behind can bleed into the first few timed
+// publishes (caught happening - inconsistently, across several languages -
+// the first time this benchmark measured envelope construction separately
+// from dispatch). See ../WORKLOAD.md.
+constexpr auto kSettle = milliseconds(200);
+
 // Monotonic-clock ticks in nanoseconds, arbitrary per-process origin - only
 // ever diffed within this process. See ../WORKLOAD.md's "Latency" section.
 inline int64_t NowNanos() { return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count(); }
@@ -77,13 +85,28 @@ RunResult RunShared(const char* config, int producers) {
     int per_producer = kTotal / producers;
     int remainder = kTotal - per_producer * producers;
 
+    // Pre-build every envelope before the timed window starts - this
+    // benchmark measures bus dispatch/queueing overhead, not envelope
+    // construction cost. In production the producer already holds a
+    // constructed envelope before it ever calls publish(). See
+    // ../WORKLOAD.md.
+    std::vector<std::vector<Envelope>> per_producer_envelopes;
+    for (int p = 0; p < producers; p++) {
+        int n = per_producer + (p == 0 ? remainder : 0);
+        std::vector<Envelope> envs;
+        envs.reserve(n);
+        for (int i = 0; i < n; i++) envs.push_back(MakeEnvelope("bench", static_cast<int64_t>(0)));
+        per_producer_envelopes.push_back(std::move(envs));
+    }
+
+    std::this_thread::sleep_for(kSettle);
     auto start = steady_clock::now();
     std::vector<std::thread> threads;
     for (int p = 0; p < producers; p++) {
-        int n = per_producer + (p == 0 ? remainder : 0);
-        threads.emplace_back([&bus, n] {
-            for (int i = 0; i < n; i++) {
-                bus.Publish(MakeEnvelope("bench", NowNanos()), milliseconds(5000));
+        threads.emplace_back([&bus, envs = std::move(per_producer_envelopes[p])]() mutable {
+            for (auto& env : envs) {
+                SetPayload(env, NowNanos());
+                bus.Publish(std::move(env), milliseconds(5000));
             }
         });
     }
@@ -128,14 +151,26 @@ RunResult RunIndependentChannels(int producers) {
         });
     }
 
-    auto start = steady_clock::now();
-    std::vector<std::thread> threads;
+    // Pre-build every envelope before the timed window starts - see the
+    // comment in RunShared.
+    std::vector<std::vector<Envelope>> per_channel_envelopes;
     for (int c = 0; c < producers; c++) {
         std::string name = "bench" + std::to_string(c);
         int n = per_channel + (c == 0 ? remainder : 0);
-        threads.emplace_back([&bus, name, n] {
-            for (int i = 0; i < n; i++) {
-                bus.Publish(MakeEnvelope(name, NowNanos()), milliseconds(5000));
+        std::vector<Envelope> envs;
+        envs.reserve(n);
+        for (int i = 0; i < n; i++) envs.push_back(MakeEnvelope(name, static_cast<int64_t>(0)));
+        per_channel_envelopes.push_back(std::move(envs));
+    }
+
+    std::this_thread::sleep_for(kSettle);
+    auto start = steady_clock::now();
+    std::vector<std::thread> threads;
+    for (int c = 0; c < producers; c++) {
+        threads.emplace_back([&bus, envs = std::move(per_channel_envelopes[c])]() mutable {
+            for (auto& env : envs) {
+                SetPayload(env, NowNanos());
+                bus.Publish(std::move(env), milliseconds(5000));
             }
         });
     }

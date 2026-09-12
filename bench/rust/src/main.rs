@@ -7,10 +7,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use seda_bus::ra_common::serde_json::Value;
-use seda_bus::{envelope_payload, make_envelope, Bus, ChannelConfig, Envelope};
+use seda_bus::{envelope_payload, make_envelope, set_payload, Bus, ChannelConfig, Envelope};
 
 const TOTAL: usize = 200_000;
 const TRIALS: usize = 3;
+
+// Pre-building TOTAL envelopes is itself a burst of allocation right before
+// the timed window starts; without a settle pause the allocator/OS memory
+// state that burst leaves behind can bleed into the first few timed
+// publishes (this was caught happening - inconsistently, across several
+// languages - the first time this benchmark measured envelope construction
+// separately from dispatch). See ../../WORKLOAD.md.
+const SETTLE: Duration = Duration::from_millis(200);
 
 // now_nanos: monotonic ticks relative to an arbitrary per-process origin -
 // only ever diffed within this process. See ../../WORKLOAD.md's "Latency"
@@ -91,17 +99,30 @@ fn run_shared(config: &'static str, producers: usize) -> RunResult {
     let per_producer = TOTAL / producers;
     let remainder = TOTAL - per_producer * producers;
 
+    // Pre-build every envelope before the timed window starts - this
+    // benchmark measures bus dispatch/queueing overhead, not envelope
+    // construction cost. In production the producer already holds a
+    // constructed envelope before it ever calls publish(); construction
+    // isn't part of what the bus does. See ../../WORKLOAD.md.
+    let mut per_producer_envelopes: Vec<Vec<Envelope>> = (0..producers)
+        .map(|p| {
+            let n = per_producer + if p == 0 { remainder } else { 0 };
+            (0..n)
+                .map(|_| make_envelope("bench", Some(Value::from(0u64)), []))
+                .collect()
+        })
+        .collect();
+
+    thread::sleep(SETTLE);
     let start = Instant::now();
     let mut handles = Vec::new();
     for p in 0..producers {
-        let n = per_producer + if p == 0 { remainder } else { 0 };
+        let envs = std::mem::take(&mut per_producer_envelopes[p]);
         let bus = bus.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..n {
-                bus.publish(
-                    make_envelope("bench", Some(Value::from(now_nanos(ref_t))), []),
-                    Some(Duration::from_secs(5)),
-                );
+            for mut env in envs {
+                set_payload(&mut env, Value::from(now_nanos(ref_t)));
+                bus.publish(env, Some(Duration::from_secs(5)));
             }
         }));
     }
@@ -162,18 +183,28 @@ fn run_independent_channels(producers: usize) -> RunResult {
         });
     }
 
+    // Pre-build every envelope before the timed window starts - see the
+    // comment in `run_shared`.
+    let mut per_channel_envelopes: Vec<Vec<Envelope>> = (0..producers)
+        .map(|c| {
+            let name = format!("bench{c}");
+            let n = per_channel + if c == 0 { remainder } else { 0 };
+            (0..n)
+                .map(|_| make_envelope(name.clone(), Some(Value::from(0u64)), []))
+                .collect()
+        })
+        .collect();
+
+    thread::sleep(SETTLE);
     let start = Instant::now();
     let mut handles = Vec::new();
     for c in 0..producers {
-        let name = format!("bench{c}");
-        let n = per_channel + if c == 0 { remainder } else { 0 };
+        let envs = std::mem::take(&mut per_channel_envelopes[c]);
         let bus = bus.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..n {
-                bus.publish(
-                    make_envelope(name.clone(), Some(Value::from(now_nanos(ref_t))), []),
-                    Some(Duration::from_secs(5)),
-                );
+            for mut env in envs {
+                set_payload(&mut env, Value::from(now_nanos(ref_t)));
+                bus.publish(env, Some(Duration::from_secs(5)));
             }
         }));
     }

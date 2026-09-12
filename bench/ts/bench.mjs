@@ -11,6 +11,16 @@ import { envelopePayload } from "../../../seda-bus-ts/dist/envelope.js";
 const TOTAL = 200_000;
 const TRIALS = 3;
 
+// Pre-building TOTAL envelopes is itself a burst of allocation right before
+// the timed window starts; without a settle pause, a GC pass provoked by
+// that burst can land inside the first few timed publishes instead (caught
+// happening - inconsistently, across several languages - the first time
+// this benchmark measured envelope construction separately from dispatch).
+// Node doesn't expose a manual GC trigger without --expose-gc, so this is a
+// settle delay only, not an explicit collection. See ../WORKLOAD.md.
+const SETTLE_MS = 200;
+const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+
 // nowUs: performance.now() has an arbitrary per-process origin (process
 // start) - only ever diffed within this process. Already in fractional
 // milliseconds; converted to microseconds at read-back. See
@@ -48,14 +58,29 @@ async function runShared(config, producers) {
   const perProducer = Math.floor(TOTAL / producers);
   const remainder = TOTAL - perProducer * producers;
 
+  // Pre-build every envelope before the timed window starts - this
+  // benchmark measures bus dispatch/queueing overhead, not envelope
+  // construction cost. In production the producer already holds a
+  // constructed envelope before it ever calls publish(). See
+  // ../WORKLOAD.md.
+  const perProducerEnvelopes = [];
+  for (let p = 0; p < producers; p++) {
+    const n = perProducer + (p === 0 ? remainder : 0);
+    const envs = [];
+    for (let i = 0; i < n; i++) envs.push(makeEnvelope("bench", 0));
+    perProducerEnvelopes.push(envs);
+  }
+
+  await settle();
   const start = Date.now();
   const tasks = [];
   for (let p = 0; p < producers; p++) {
-    const n = perProducer + (p === 0 ? remainder : 0);
+    const envs = perProducerEnvelopes[p];
     tasks.push(
       (async () => {
-        for (let i = 0; i < n; i++) {
-          await bus.publish(makeEnvelope("bench", nowUs()), { timeoutMs: 5000 });
+        for (const env of envs) {
+          env.addContent(nowUs());
+          await bus.publish(env, { timeoutMs: 5000 });
         }
       })(),
     );
@@ -105,15 +130,27 @@ async function runIndependentChannels(producers) {
     });
   }
 
-  const start = Date.now();
-  const tasks = [];
+  // Pre-build every envelope before the timed window starts - see the
+  // comment in runShared.
+  const perChannelEnvelopes = [];
   for (let c = 0; c < producers; c++) {
     const name = `bench${c}`;
     const n = perChannel + (c === 0 ? remainder : 0);
+    const envs = [];
+    for (let i = 0; i < n; i++) envs.push(makeEnvelope(name, 0));
+    perChannelEnvelopes.push(envs);
+  }
+
+  await settle();
+  const start = Date.now();
+  const tasks = [];
+  for (let c = 0; c < producers; c++) {
+    const envs = perChannelEnvelopes[c];
     tasks.push(
       (async () => {
-        for (let i = 0; i < n; i++) {
-          await bus.publish(makeEnvelope(name, nowUs()), { timeoutMs: 5000 });
+        for (const env of envs) {
+          env.addContent(nowUs());
+          await bus.publish(env, { timeoutMs: 5000 });
         }
       })(),
     );

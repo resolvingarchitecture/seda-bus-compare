@@ -17,6 +17,19 @@ public class Bench {
     static final int TOTAL = 200_000;
     static final int TRIALS = 3;
 
+    // Pre-building TOTAL envelopes is itself a burst of allocation right
+    // before the timed window starts; without a settle pause + explicit GC,
+    // a collection provoked by that burst can land inside the first few
+    // timed publishes instead (caught happening - inconsistently, across
+    // several languages - the first time this benchmark measured envelope
+    // construction separately from dispatch). See ../../WORKLOAD.md.
+    static final long SETTLE_MS = 200;
+
+    static void settle() throws InterruptedException {
+        System.gc();
+        Thread.sleep(SETTLE_MS);
+    }
+
     // now_nanos: System.nanoTime() has an arbitrary per-process origin - only
     // ever diffed within this process. See ../../WORKLOAD.md's "Latency" section.
     record LatencyStats(double p50Us, double p99Us, double p999Us, double maxUs) {
@@ -72,14 +85,30 @@ public class Bench {
         int perProducer = TOTAL / producers;
         int remainder = TOTAL - perProducer * producers;
 
+        // Pre-build every envelope before the timed window starts - this
+        // benchmark measures bus dispatch/queueing overhead, not envelope
+        // construction cost. In production the producer already holds a
+        // constructed envelope before it ever calls publish(). See
+        // ../../WORKLOAD.md.
+        Envelope[][] perProducerEnvelopes = new Envelope[producers][];
+        for (int p = 0; p < producers; p++) {
+            int n = perProducer + (p == 0 ? remainder : 0);
+            Envelope[] envs = new Envelope[n];
+            for (int i = 0; i < n; i++) {
+                Envelope e = Envelope.documentFactory();
+                e.getDynamicRoutingSlip().addRoute(new SimpleRoute("bench", "RECEIVE"));
+                envs[i] = e;
+            }
+            perProducerEnvelopes[p] = envs;
+        }
+
+        settle();
         long start = System.nanoTime();
         Thread[] threads = new Thread[producers];
         for (int p = 0; p < producers; p++) {
-            int n = perProducer + (p == 0 ? remainder : 0);
+            Envelope[] envs = perProducerEnvelopes[p];
             threads[p] = new Thread(() -> {
-                for (int i = 0; i < n; i++) {
-                    Envelope e = Envelope.documentFactory();
-                    e.getDynamicRoutingSlip().addRoute(new SimpleRoute("bench", "RECEIVE"));
+                for (Envelope e : envs) {
                     e.addContent(System.nanoTime());
                     while (!bus.publish(e)) {
                         // capacity == TOTAL, so this should never actually spin.
@@ -126,15 +155,28 @@ public class Bench {
             });
         }
 
-        long start = System.nanoTime();
-        Thread[] threads = new Thread[producers];
+        // Pre-build every envelope before the timed window starts - see the
+        // comment in runShared.
+        Envelope[][] perChannelEnvelopes = new Envelope[producers][];
         for (int c = 0; c < producers; c++) {
             String name = "bench" + c;
             int n = perChannel + (c == 0 ? remainder : 0);
+            Envelope[] envs = new Envelope[n];
+            for (int i = 0; i < n; i++) {
+                Envelope e = Envelope.documentFactory();
+                e.getDynamicRoutingSlip().addRoute(new SimpleRoute(name, "RECEIVE"));
+                envs[i] = e;
+            }
+            perChannelEnvelopes[c] = envs;
+        }
+
+        settle();
+        long start = System.nanoTime();
+        Thread[] threads = new Thread[producers];
+        for (int c = 0; c < producers; c++) {
+            Envelope[] envs = perChannelEnvelopes[c];
             threads[c] = new Thread(() -> {
-                for (int i = 0; i < n; i++) {
-                    Envelope e = Envelope.documentFactory();
-                    e.getDynamicRoutingSlip().addRoute(new SimpleRoute(name, "RECEIVE"));
+                for (Envelope e : envs) {
                     e.addContent(System.nanoTime());
                     while (!bus.publish(e)) {
                         // capacity == n, so this should never actually spin.

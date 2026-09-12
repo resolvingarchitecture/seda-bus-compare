@@ -110,11 +110,18 @@ rather than accepted, and it took three separate fixes:
    `getentropy(2)`, a direct syscall with no shared file descriptor or
    handle, so no lock is needed at all; each thread just calls it.
 
-All three fixes are real, verified, and reflected in every C++ number in
-`RESULTS.md`. Fix 3's effect was immediate and large: `chan` went from
-282,287 eps (1.42x) to 712,444 eps (**5.29x**) — right in Rust/Go's range,
-confirming the shared mutex, not anything structural about C++ or its
-queue implementation, was the ceiling.
+All three fixes are real and verified, and were reflected in every C++
+number in `RESULTS.md` **at the time they were measured**. A later pass
+excluded envelope construction from this benchmark's timed window entirely
+(see `bench/WORKLOAD.md` and `RESULTS.md`'s "C++'s construction bugs: still
+fixed, no longer visible here") — since all three bugs lived in
+construction, not dispatch, their dramatic before/after swings described
+below are historical record, not something the current `RESULTS.md`
+numbers can reproduce or falsify anymore. Fix 3's effect was immediate and
+large at the time: `chan` went from 282,287 eps (1.42x) to 712,444 eps
+(**5.29x**) — right in Rust/Go's range, confirming the shared mutex, not
+anything structural about C++ or its queue implementation, was the
+ceiling.
 
 That result also settles what fix 3 was *not* responsible for: `par`
 stayed collapsed (0.48x, statistically the same as the 0.34x measured

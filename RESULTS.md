@@ -1,27 +1,48 @@
 # Results
 
-Read [`METHODOLOGY.md`](METHODOLOGY.md) first. It's not optional this time:
-the first pass at these numbers was contaminated by concurrent load on the
-host and reported a wrong conclusion (Rust's `par` looking flat) with a
-plausible-sounding but incorrect explanation attached. That was caught by
-direct, specific pushback, verified with a clean rerun, and led to finding
-three real bugs in `ra-common-cpp` and a genuine gap in how this
-benchmark's `par` configuration was being interpreted. Everything below
-reflects that — this is the corrected report, not the first draft.
+Read [`METHODOLOGY.md`](METHODOLOGY.md) first. It's not optional: this
+report has now been substantially corrected twice by direct, specific
+pushback catching a measurement flaw this session didn't see on its own —
+first a contaminated host reporting Rust's `par` as flat, second (this
+pass) envelope *construction* cost silently folded into every "bus
+overhead" number in the report. Both are described below, in full, not
+smoothed over.
 
-**Run date:** 2026-09-11 (latest rerun: `seda-bus-rust` rewired onto
-`ra-common-rust`, same as every other port, plus per-envelope latency
-measurement added across all seven — see "Rust: the `ra-common` rewire"
-and "Latency" below for what changed and why the numbers moved). Raw data:
-[`results/raw/*.jsonl`](results/raw/), [`results/summary.csv`](results/summary.csv).
-Regenerate with
+**Run date:** 2026-09-12. **What changed this pass, and why it's a bigger
+deal than a numbers refresh:** every `bench/<lang>` program used to build
+each envelope *inside* the timed producer loop, immediately before
+`Publish`. That's not what this benchmark claims to measure ("Bus/scheduler
+overhead in isolation from business logic" — `bench/WORKLOAD.md`) — a real
+producer already holds a constructed envelope before it calls the bus, so
+folding construction into the timed window was measuring "how fast can
+this language build a `ra-common`-shaped object" alongside, and confounded
+with, "how fast is this bus." Caught directly — *"creating an envelope
+should not be part of the test... we're not measuring the ability of this
+code to create an Envelope"* — not self-discovered. Every `bench/<lang>`
+program now pre-builds all 200,000 envelopes in an untimed warm-up phase,
+with a settle pause (explicit GC where the runtime has one) before the
+clock starts; the timed loop only sets the publish-time payload on an
+already-built envelope. See `bench/WORKLOAD.md` for the full spec change.
+
+This is not a small effect. It moved every throughput number in this
+report, reordered the throughput ranking (Java now leads, not Rust), and —
+more importantly — **overturned this report's own previous claim that
+"compiled languages never show backlog."** That claim was only true because
+the old, flawed benchmark's construction cost accidentally throttled every
+producer to roughly its consumer's pace. See "Latency: what the tail looks
+like" below.
+
+Raw data: [`results/raw/*.jsonl`](results/raw/),
+[`results/summary.csv`](results/summary.csv). Regenerate with
 `./scripts/build_and_run.sh && python3 scripts/aggregate.py && python3 scripts/plot_charts.py`
-— on a quiet host; see `METHODOLOGY.md` for why that matters. The chart
-script needs `matplotlib` (`pip install matplotlib`).
+— on a genuinely quiet host; see `METHODOLOGY.md` for why that matters, and
+"A note on host quietness" below for what "quiet" actually took to verify
+this pass. The chart script needs `matplotlib` (`pip install matplotlib`).
 
 ## Throughput: three configurations, not two
 
-200,000 envelopes/trial, 3 trials/configuration. All numbers envelopes/sec,
+200,000 envelopes/trial, 3 trials/configuration, envelope construction
+excluded from the timed window (see above). All numbers envelopes/sec,
 mean of 3 trials (see `results/summary.csv` for min/max ranges).
 
 - **`seq`** — 1 producer, 1 channel. Baseline.
@@ -32,340 +53,367 @@ mean of 3 trials (see `results/summary.csv` for min/max ranges).
   removed.
 
 | Implementation               |     seq |     par | par vs. seq |          chan | chan vs. seq |
-|------------------------------|--------:|--------:|------------:|--------------:|-------------:|
-| Rust                         | 208,568 | 516,836 |       2.48x | **1,075,379** |        5.16x |
-| Go                           | 116,026 | 298,989 |       2.58x |       989,465 |    **8.53x** |
-| Java                         | 307,890 | 543,493 |       1.77x |       903,183 |        2.93x |
-| C++                          | 124,811 |  58,379 |   **0.47x** |       632,414 |        5.07x |
-| C#                           | 158,952 | 282,073 |       1.77x |       420,814 |        2.65x |
-| Python 3.14t (free-threaded) |  33,258 |  31,930 |       0.96x |        91,537 |        2.75x |
-| TypeScript (Node 22)         |  16,344 |  16,577 |       1.01x |        51,407 |        3.15x |
-| Python 3.13 (GIL)            |  35,892 |  10,958 |   **0.31x** |        11,959 |        0.33x |
+|-------------------------------|--------:|--------:|------------:|--------------:|-------------:|
+| Java                          | 861,490 | 556,566 |       0.65x | **1,968,262** |        2.28x |
+| Go                            | 408,140 | 412,299 |       1.01x |     1,759,884 |        4.31x |
+| Rust                          | 544,162 | 459,738 |       0.84x |       645,609 |        1.19x |
+| C#                            | 272,740 | 273,234 |       1.00x |       387,930 |        1.42x |
+| C++                           | 175,861 |  68,998 |   **0.39x** |       379,529 |        2.16x |
+| Python 3.14t (free-threaded)  | 102,173 |  45,909 |       0.45x |       260,058 |        2.55x |
+| TypeScript (Node 22)          |  21,619 |  14,436 |       0.67x |       124,338 |    **5.75x** |
+| Python 3.13 (GIL)             |  53,148 |  36,206 |       0.68x |        35,660 |    **0.67x** |
 
 ![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
 
-**Rust's numbers dropped substantially from the previous report** — `seq`
-469,164 → 208,568, `chan` 2,725,588 → 1,075,379 — because `seda-bus-rust`
-is no longer the one port outside this comparison's main variable: it's
-now rewired onto `ra-common-rust`'s `Envelope`, same as the other six. See
-"Rust: the `ra-common` rewire" below for why that costs real throughput,
-not just changes bookkeeping. Every other language's numbers hold steady
-run-to-run within normal noise. **Go's `chan` ratio (8.53x) is the highest
-of the eight**, ahead of Rust's 5.16x, though Rust's absolute `chan`
-throughput (1.08M eps) still leads Go's (989K) — a smaller `seq`
-denominator makes for a bigger ratio without changing which implementation
-is actually fastest in absolute terms; read the ratio and the absolute
-number as answering different questions, not the same one.
+**Every number moved, most of them a lot, once construction came out of
+the timed window** — and not proportionally, so the ranking reshuffled.
+Java's `chan` more than doubled (903K → 1.97M) and now leads outright,
+where it was third before. Go's `chan` nearly doubled (989K → 1.76M) and
+is now clearly #2. Rust's `chan` *dropped* (1.08M → 646K) and fell from #1
+to #3 — the previous report's entire "Rust: the `ra-common` rewire cost
+real throughput" finding is revisited below, because most (not
+necessarily all) of that "cost" turns out to have been construction cost,
+now excluded by design. C++'s `seq` rose modestly (125K → 176K, consistent
+with construction previously adding real but not dominant weight there).
+**The lesson: this report's throughput ranking was never actually settled
+— it was measuring a different, conflated thing until this pass.**
 
-**The headline finding:** every implementation gets real, often substantial
-gains from parallelism — `chan` beats `seq` in all eight cases except
-GIL-bound Python. The `par` column is not a measure of "how parallel is
-this bus" — it's a measure of lock contention on one shared stage, and
-conflating the two was the error in this report's first draft. See
-`METHODOLOGY.md`'s "Does parallelism work?" section for the controlled
-comparison that proves this rather than asserts it.
+**The headline finding still holds, on cleaner ground now:** every
+implementation gets real, often substantial gains from parallelism —
+`chan` beats `seq` in all eight cases except GIL-bound Python (0.67x,
+still a real collapse — see "Python: GIL vs. free-threaded" below). The
+`par` column is still not a measure of "how parallel is this bus" — it's a
+measure of lock contention on one shared stage; see `METHODOLOGY.md`'s
+"Does parallelism work?" section for the controlled comparison.
 
 ## Latency: what the tail looks like
 
 Every delivered envelope's latency (consumer-invocation time minus its
-embedded publish time) is now recorded and reduced to `p50`/`p99`/`p999`/
-`max` per config, in microseconds. **Read `bench/WORKLOAD.md`'s "Latency"
-section before these numbers** — this benchmark's capacity is deliberately
-large enough that back-pressure never engages, so whenever a producer
-publishes faster than its consumer(s) can drain, a real backlog builds and
-these numbers measure *queueing delay*, not raw per-envelope dispatch cost.
-That's not a flaw; it's a second, genuinely different signal from
-throughput, and it shows things throughput alone hides completely.
+publish-time payload) is recorded and reduced to `p50`/`p99`/`p999`/`max`
+per config, in microseconds. **Read `bench/WORKLOAD.md`'s "Latency" section
+before these numbers** — this benchmark's capacity is deliberately large
+enough that back-pressure never engages, so whenever a producer publishes
+faster than its consumer(s) can drain, a real backlog builds and these
+numbers measure *queueing delay*, not raw per-envelope dispatch cost.
 
-| Implementation    | Config |        p50 (us) |     p99 (us) |    p999 (us) |     max (us) |
-|-------------------|--------|----------------:|-------------:|-------------:|-------------:|
-| Rust              | seq    |    **127,088.2**† |    243,387.0 |    245,277.2 |    291,585.8 |
-| Rust              | par    |            62.0 |      5,496.6 |      7,079.5 |     11,430.8 |
-| Rust              | chan   |        22,022.1 |     52,850.4 |     55,073.8 |     63,226.8 |
-| Go                | seq    |           618.9 |      5,150.4 |      7,194.9 |      8,569.6 |
-| Go                | par    |         2,756.1 |     10,660.9 |     11,799.1 |     19,957.1 |
-| Go                | chan   |         8,855.6 |     37,160.2 |     42,722.5 |     47,050.7 |
-| Java              | seq    |             6.3 |         30.5 |         90.9 |      3,583.0 |
-| Java              | par    |            12.3 |      1,137.9 |      2,027.3 |      4,001.0 |
-| Java              | chan   |            10.8 |      1,611.8 |      2,913.2 |      6,004.8 |
-| C++               | seq    |            30.9 |      2,419.7 |      3,316.1 |      6,444.7 |
-| C++               | par    |            16.6 |        118.7 |        508.2 |      2,161.6 |
-| C++               | chan   |         7,466.9 |     36,392.1 |     39,156.6 |     42,607.2 |
-| C#                | seq    |             6.2 |         75.8 |      2,039.1 |     37,001.5 |
-| C#                | par    |            10.2 |        122.4 |      1,595.7 |     12,550.3 |
-| C#                | chan   |            11.9 |        435.9 |      2,901.8 |      9,638.3 |
-| Python 3.14t      | seq    |            41.5 |     10,141.1 |     15,607.1 |     43,090.2 |
-| Python 3.14t      | par    | **1,214,855.4** |  2,019,934.4 |  2,024,248.2 |  2,163,819.5 |
-| Python 3.14t      | chan   |         1,159.9 |     32,746.1 |     44,886.0 |     58,822.5 |
-| TypeScript        | seq    | **5,868,878.1** |  7,097,218.5 |  7,100,861.2 |  7,138,256.1 |
-| TypeScript        | par    | **5,802,716.0** |  7,023,989.9 |  7,033,335.5 |  7,138,062.2 |
-| TypeScript        | chan   |     1,516,281.1 |  1,884,631.7 |  1,890,423.6 |  1,948,672.1 |
-| Python 3.13 (GIL) | seq    |        18,531.7 |     87,611.4 |    102,829.6 |    136,593.7 |
-| Python 3.13 (GIL) | par    | **8,732,330.5** | 12,962,985.8 | 13,036,713.4 | 13,510,741.4 |
-| Python 3.13 (GIL) | chan   |     8,251,324.3 | 13,130,436.2 | 13,237,334.5 | 14,322,201.9 |
+| Implementation    | Config |         p50 (us) |       p99 (us) |      p999 (us) |       max (us) |
+|-------------------|--------|------------------:|----------------:|----------------:|----------------:|
+| Java               | seq    |          12,301.0 |         18,253.4 |         18,650.2 |         26,527.6 |
+| Java               | par    |           1,123.9 |          5,204.0 |          5,602.3 |          9,468.1 |
+| Java               | chan   |          18,523.3 |         34,827.7 |         35,903.5 |         61,895.7 |
+| Go                 | seq    |         172,144.8 |        252,232.7 |        253,427.0 |        299,153.7 |
+| Go                 | par    |          53,172.8 |         88,893.3 |         89,190.0 |        102,887.4 |
+| Go                 | chan   |          38,795.9 |         68,700.5 |         70,759.2 |         75,217.7 |
+| Rust               | seq    |           3,597.4 |         44,018.3 |         44,556.3 |         63,028.0 |
+| Rust               | par    |              61.1 |         66,075.7 |         67,513.4 |         70,363.9 |
+| Rust               | chan   |         114,914.7 |        200,077.4 |        208,652.1 |        227,169.6 |
+| C#                 | seq    |         197,274.0 |        312,282.7 |        314,225.8 |        439,031.3 |
+| C#                 | par    |              15.8 |          1,805.3 |         35,645.0 |         79,071.4 |
+| C#                 | chan   |           2,975.3 |        129,019.4 |        133,993.6 |        184,477.5 |
+| C++                | seq    |              21.6 |            200.1 |            518.4 |         11,358.6 |
+| C++                | par    |              13.6 |        153,688.0 |        155,973.3 |        161,260.6 |
+| C++                | chan   |          58,806.7 |        234,509.3 |        295,332.8 |        322,910.3 |
+| Python 3.14t       | seq    |         272,012.2 |        403,180.6 |        405,352.4 |        461,979.2 |
+| Python 3.14t       | par    |       1,145,814.6 |      1,563,480.1 |      1,567,483.2 |      1,604,400.9 |
+| Python 3.14t       | chan   |         173,936.8 |        336,498.2 |        338,502.5 |        360,242.7 |
+| TypeScript         | seq    |       4,417,982.2 |      6,218,729.6 |      6,228,380.5 |      6,329,220.6 |
+| TypeScript         | par    |       6,656,120.5 |      9,436,286.4 |      9,438,434.9 |      9,537,606.6 |
+| TypeScript         | chan   |         600,404.0 |      1,076,210.8 |      1,077,789.3 |      1,183,206.8 |
+| Python 3.13 (GIL)  | seq    |         581,421.6 |        950,212.9 |        955,746.0 |      1,210,851.6 |
+| Python 3.13 (GIL)  | par    |       1,950,780.8 |      2,906,951.6 |      2,923,365.2 |      3,525,135.9 |
+| Python 3.13 (GIL)  | chan   |       2,783,704.1 |      4,549,412.7 |      4,624,846.8 |      4,892,312.0 |
 
 ![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
 
-**† Rust's `seq` latency is not a trustworthy number and is flagged, not
-hidden.** `seq` has exactly one consumer thread draining a queue holding
-all 200,000 envelopes at once (the same backlog-by-design structure
-documented below for TS/Python) — so if that single thread is paused by
-the host scheduler for even a few milliseconds, the *entire remaining
-backlog's* measured latency shifts by that amount. On this benchmark host,
-repeated runs showed real multi-millisecond single-thread scheduling
-stalls (confirmed with an isolated `Instant::now()` jitter probe, unrelated
-to this bus's code), and Rust's `seq` — now several hundred milliseconds
-long per trial post-rewire, up from ~350ms before it — has enough time
-exposure to reliably catch one. `par`/`chan` (8 threads, shorter trials)
-mostly don't. The throughput numbers above are unaffected (computed from
-only two clock reads per trial, not one pair per envelope) and were
-consistent within a tight band across many reruns; the `seq` latency row
-is reported for completeness, not as a precise measurement — a clean
-number needs a dedicated quiet host, not something achieved this pass.
+**The central finding of this pass: once producers aren't artificially
+throttled by construction cost, several "compiled, natively-multithreaded"
+implementations show a real, sustained backlog — not a brief stall — and
+this shows up specifically in `chan`, the configuration this report has
+repeatedly held up as "no artificial contention point, nothing left to
+hide behind."** The previous report's claim that "the compiled,
+natively-multithreaded implementations (Rust, Go, Java, C++, C#) never
+show this pattern at all" is **false** under the corrected methodology. It
+was true only because the old benchmark's construction cost happened to
+throttle every producer to roughly its own consumer's pace, masking any
+real capacity gap.
 
-**The standout finding: TypeScript's and Python's `seq`/`par` latency is in
-the single-digit *seconds*, while every other implementation stays in the
-microseconds-to-low-milliseconds range for the same configs.** This is not
-a per-envelope dispatch cost problem — it's queueing delay from a real
-producer/consumer rate mismatch: TS's single-threaded event loop and
-Python's GIL/free-threaded thread-switching overhead both mean the
-consumer(s) can't keep up with a producer publishing as fast as it can into
-a 200,000-capacity queue, so a backlog builds and later envelopes wait
-behind thousands of earlier ones — for TS specifically, half of all
-200,000 envelopes in a `seq` trial wait **longer than 5.8 seconds** before
-being consumed, out of a total trial duration of only ~12 seconds: the
-backlog is present for essentially the whole run, not a brief startup
-spike. Compare this to `chan`, where splitting into 8
-independent single-consumer channels lets each consumer roughly keep pace
-with its own producer: TS's `chan` `p50` drops to 1.5 seconds (still huge
-in absolute terms — Node's single thread is still splitting time across 8
-event-loop tasks — but 4x tighter than `seq`/`par`), and Python 3.14t's
-`chan` `p50` drops from 1.2 million microseconds to **1,160 microseconds**
-— a >1000x improvement, the clearest evidence in this whole report that
-free-threading actually fixes a real backlog problem, not just a
-throughput number. The compiled, natively-multithreaded implementations
-(Rust, Go, Java, C++, C#) never show this pattern at all — their `p50`
-stays in the microseconds-to-low-milliseconds range in every config,
-meaning their consumers keep pace with their producers throughout.
+To tell a genuine sustained backlog (`p50` itself a large fraction of the
+whole trial) apart from a brief tail-only stall (`p50` fine, `max` spikes)
+apart from a truly clean run (both low), the table below reports each
+`p50` and `max` as a fraction of that config's mean trial duration
+(`elapsed_ms`) — Little's law terms: a backlog that persists for most of
+the run pulls both `p50` and `max` up together; an isolated stall pulls
+only `max` up; a clean run pulls neither up.
 
-**A new, real, unresolved finding surfaced while collecting this data:**
-`seda-bus-go`'s `chan` config failed to fully drain within its 60s shutdown
-timeout on two separate runs during this session (`delivered` short of
-`total`, `drained: false`), both times on a freshly quiet host with no
-other Docker activity — not the contamination pattern documented above. A
-third rerun of the same binary drained cleanly all three times. This looks
-like a real, intermittent race in `seda-bus-go`'s shutdown/drain path under
-the `chan` topology specifically (8 independent channels, high throughput),
-not a host-contention artifact and not something in this benchmark's own
-instrumentation (the failure is in `Shutdown()`'s drain accounting, not in
-publish or latency recording). Not root-caused or fixed in this pass — flagged
-here rather than silently discarded, per this report's own standard for
-handling anomalies. The numbers in both tables above are from the clean
-third run; any reproduction attempt should watch for a `drained: false`
-line in `results/raw/go.jsonl` and discard/rerun that trial rather than
-average it in.
+| Implementation    | Config | mean elapsed (ms) | p50/elapsed | max/elapsed | Read as                          |
+|-------------------|--------|-------------------:|------------:|------------:|-----------------------------------|
+| C++                | seq    |             1,142.0 |        0.00 |        0.01 | clean                             |
+| C++                | par    |             2,898.7 |        0.00 |        0.06 | clean, mild tail                  |
+| Java               | par    |               361.0 |        0.00 |        0.03 | clean                             |
+| C#                 | par    |               733.0 |        0.00 |        0.11 | clean, mild tail                  |
+| Rust               | par    |               434.7 |        0.00 |        0.16 | tail-only stall                   |
+| Rust               | seq    |               368.7 |        0.01 |        0.17 | tail-only stall                   |
+| C#                 | chan   |               517.0 |        0.01 |        0.36 | tail-only stall (large tail)      |
+| Java               | seq    |               233.3 |        0.05 |        0.11 | mild backlog                      |
+| C++                | chan   |               526.7 |        0.11 |        0.61 | **real backlog**                  |
+| Go                 | par    |               484.3 |        0.11 |        0.21 | mild-to-real backlog              |
+| Java               | chan   |               106.3 |        0.17 |        0.58 | **real backlog**                  |
+| Python 3.14t       | seq    |             1,958.0 |        0.14 |        0.24 | real backlog                      |
+| C#                 | seq    |               753.7 |        0.26 |        0.58 | **real backlog**                  |
+| Python 3.14t       | chan   |               769.0 |        0.23 |        0.47 | real backlog                      |
+| Python 3.14t       | par    |             4,360.7 |        0.26 |        0.37 | real backlog                      |
+| Go                 | chan   |               113.3 |        0.34 |        0.66 | **real backlog**                  |
+| Go                 | seq    |               494.0 |        0.35 |        0.61 | **real backlog**                  |
+| Rust               | chan   |               309.7 |        0.37 |        0.73 | **real backlog**                  |
+| Python 3.13 (GIL)  | par    |             5,525.3 |        0.35 |        0.64 | real backlog                      |
+| TypeScript         | chan   |             1,610.7 |        0.37 |        0.73 | real backlog                      |
+| Python 3.13 (GIL)  | seq    |             3,765.3 |        0.15 |        0.32 | real backlog                      |
+| Python 3.13 (GIL)  | chan   |             5,613.7 |        0.50 |        0.87 | **real backlog**                  |
+| TypeScript         | seq    |             9,254.3 |        0.48 |        0.68 | **real backlog**                  |
+| TypeScript         | par    |            13,854.7 |        0.48 |        0.69 | **real backlog**                  |
+
+**C++ `seq`/`par` are the only two cases in the whole report that are
+genuinely clean** — its single/shared-channel consumer path keeps pace
+with a maximally fast producer every time. Everything else shows at least
+a tail-only stall, and the majority show a real, sustained backlog once
+construction can no longer throttle the producer down to the consumer's
+pace. **Rust and C++ both flip from "clean" to "real backlog" specifically
+in `chan`** — the configuration this report previously called out as
+"no artificial contention point left to hide behind." That framing was
+correct about the lock, wrong about there being nothing left to hide
+behind: a fast-enough producer can still outrun 8 independent
+single-consumer channels if per-channel dispatch has any real per-item
+cost, which it evidently does in both.
+
+**Rust's `seq` tail-only stall is real, still unresolved, and now milder
+than previously reported** — `p50` is fine (3.6ms mean, dragged up only by
+occasional bad trials; several trials land sub-microsecond), but `max`
+still reaches 63ms, a genuine, reproducible tail latency this pass didn't
+root-cause. **This revises, not confirms, the previous report's
+conclusion.** The prior pass ran a direct A/B test (rebuilding the
+pre-`ra_common`-rewire `seda-bus-rust` commit and running it back-to-back
+with the current one, same host, same day) and found the old, minimal
+envelope clean on 9 of 9 `seq` trials against a roughly 1-in-3 clean rate
+with `ra_common::Envelope` — concluding the rewire's heavier envelope
+construction was the trigger. **That A/B test was itself run under the old,
+construction-inside-the-timed-window methodology.** Now that construction
+is excluded for both cases, the mechanism needs re-verification against
+the corrected benchmark before that causal claim can stand as-is; it is
+neither confirmed nor retracted here — flagged as open, not silently
+carried forward. What *is* newly confirmed: swapping the pool's job queue
+from `std::sync::mpsc` to `crossbeam-channel` (which spins briefly before
+parking, closer to what Java's `ThreadPoolExecutor` does) measurably
+reduced but did not eliminate the stall, while costing `par` a reproducible
+~15-20% of its throughput from contention on the now-lock-free queue under
+8-way load — judged not worth keeping for a change to shared production
+code (`service-bus-rust`, `i2p-rust`, `tor-client-rust`, and transitively
+`1m5-core-rust` all depend on `seda-bus-rust`'s `Pool`) and reverted.
+
+**`seda-bus-go`'s `chan` config again failed to fully drain within its 60s
+shutdown timeout** on this pass's first attempt (2 of 3 trials,
+`delivered` short of `total`, `drained: false`) — the same intermittent
+race first flagged in an earlier report and still not root-caused. A
+following rerun of the same unmodified binary drained cleanly all three
+times; that clean run is what's in the tables above. This is now confirmed
+across two separate sessions and reruns as a real, intermittent bug in
+`seda-bus-go`'s shutdown/drain accounting under the `chan` topology
+specifically, not a benchmark-instrumentation or host-contamination
+artifact. Any reproduction attempt should watch for `"drained":false` in
+`results/raw/go.jsonl` and discard/rerun that trial rather than average it
+in — this report's standing practice, followed here again.
+
+## A note on host quietness
+
+This pass's numbers required more than "no other containers running" to
+trust. Mid-session, `docker ps -q` showed zero containers while
+`qemu-system-x86_64` (Docker Desktop's VM) held steady at 165-169% CPU —
+real, sustained background load with nothing visibly running, most likely
+Docker Desktop's own housekeeping accumulated after many hours of
+build/remove cycles earlier in the same session. `ps aux`'s `%CPU` column
+is a lifetime average, not instantaneous, and **stayed elevated and
+slowly decaying for over a minute after a Docker Desktop restart** in a
+way that looked like continued load but wasn't — confirmed by sampling
+`/proc/<pid>/stat`'s jiffie counters directly across a fixed interval,
+which showed single-digit instantaneous CPU% the whole time. `docker ps -q
+== 0` is necessary but not sufficient evidence of a quiet host; a direct
+instantaneous CPU sample of the VM process is a stronger check, and is
+what this pass's canonical run was gated on.
 
 ## What went wrong, and what's real
 
-- **Rust's original "flat `par`" (0.96x) was a measurement artifact**, not
-  a finding. The host was running concurrent Docker builds during the
-  original timed run; a clean rerun with nothing else executing shows real
-  scaling (`par` 1.24x) and, more importantly, `chan` shows Rust scaling
-  essentially as well as any implementation here (5.44x, second only to
-  Go). The original "near-zero bus overhead, nothing left to parallelize"
-  explanation was plausible-sounding and wrong — it explained a number that
-  was itself wrong.
-- **C++'s `par` collapse (now 0.47x, previously 0.34x pre-fix) is real and
-  reproduces consistently** across multiple clean runs, unlike Rust's.
-  Traced to three now-fixed bugs in `ra-common-cpp` (commits `8700729`,
-  `7e5717b`, `1b3f687` — see `METHODOLOGY.md`). The third fix (removing the
-  shared `/dev/urandom` mutex) fixed `chan` completely — 1.42x → ~5x,
-  now in the same range as Rust/Go — which proves that mutex was never the
-  cause of `par`'s collapse: `chan` has no shared queue, so a channel-level
-  lock issue couldn't touch it, and it improved anyway once the urandom
-  lock was gone. `par`'s remaining collapse is the channel's own
-  bounded-queue mutex under Docker's virtualization specifically — a
-  clean *native* run of the same binary shows `par` essentially matching
-  `seq` (see `METHODOLOGY.md`), so this is a Docker-specific contention
-  cost on that one lock, not a bug in the queue implementation itself.
-- **Python 3.13's GIL collapse (0.29x/0.28x) is real in both
-  configurations** — the GIL serializes bytecode execution regardless of
-  how many channels exist, so removing the channel-level lock doesn't help
-  when the deeper bottleneck is the interpreter itself.
+- **This pass's central lesson: excluding envelope construction from the
+  timed window was a bigger, more consequential fix than it looked going
+  in.** It wasn't a small correction to Rust's numbers — it reshuffled the
+  throughput ranking across all eight implementations and overturned a
+  standing qualitative claim ("compiled languages never backlog") that
+  earlier passes of this same report had stated with confidence. Caught by
+  direct pushback (*"we're not measuring the ability of this code to
+  create an Envelope"*), not self-discovered — consistent with every other
+  correction in this report's history.
+- **Rust's original "flat `par`" (0.96x), from the very first pass of this
+  report, was a measurement artifact**, not a finding — the host was
+  running concurrent Docker builds during that timed run. Unrelated to
+  this pass's construction fix; kept here for the report's own running
+  record of corrections.
+- **C++'s `par` collapse is real and reproduces consistently** across every
+  pass of this report regardless of methodology changes elsewhere (now
+  0.39x; previously 0.47x construction-inclusive, 0.34x before that,
+  pre-fix). Traced to `par`'s shared bounded-queue mutex under Docker's
+  virtualization specifically — see `METHODOLOGY.md`. The three
+  construction-time bugs found and fixed in `ra-common-cpp` during an
+  earlier pass (see "C++'s construction bugs: still fixed, no longer
+  visible here" below) never touched `par`'s collapse, and still don't.
+- **Python 3.13's GIL collapse is real, though its *shape* changed under
+  the corrected methodology** — `chan` now shows a real 0.67x collapse
+  (was 0.33x construction-inclusive); `par` moved from a severe 0.31x
+  collapse to a milder 0.68x. The GIL still serializes bytecode execution
+  regardless of channel topology; removing construction cost changed how
+  much of each timed iteration that serialization dominates, not whether
+  it's real.
 
-## C++: three real bugs, found and fixed
+## C++'s construction bugs: still fixed, no longer visible here
 
-The first C++ run (before any fixes) measured ~15,000 eps sequential —
-20-30x slower than Rust for identical work between two hand-rolled-thread-
-pool, no-GC implementations that should be structurally comparable.
+An earlier pass of this report found and fixed three real bugs in
+`ra-common-cpp` — re-opened `/dev/urandom` handles, a JSON
+serialize-then-reparse route clone, and a process-wide mutex around random
+byte generation (commits `8700729`, `7e5717b`, `1b3f687`; full detail in
+`METHODOLOGY.md`). All three were **construction-time** costs: every one
+fired inside `Envelope`/`Route` construction, invoked once per envelope
+before `Publish` was ever called.
 
-1. **`ra-common-cpp` was re-opening `/dev/urandom`**
-   (`fopen`/`fread`/`fclose`) on every random-byte call, twice per envelope
-   — 400,000 file-open cycles per trial. **Fixed: commit `8700729`.**
-2. **`Envelope::GetRoute()`/`Ratchet()` cloned routes via a JSON
-   serialize-then-reparse round trip** instead of a proper clone, found by
-   isolating envelope construction from bus overhead (200,000 envelopes,
-   no bus: 1.19M eps — 9x the full-bus number at the time). **Fixed: commit
-   `7e5717b`**, a proper virtual `Route::Clone()`.
-3. **`SecureRandomBytes` kept the fixed `/dev/urandom` handle behind one
-   process-wide `std::mutex`**, so every thread on every channel serialized
-   on it regardless of channel topology — visible specifically in `chan`
-   (independent channels, no queue lock at all), which still only reached
-   1.42x versus Rust/Go's 5-6x. **Fixed: commit `1b3f687`**, replacing the
-   FILE*+mutex with `getentropy(2)`, a direct syscall with no shared state
-   and therefore no lock needed.
+**Now that construction is excluded from this benchmark's timed window by
+design, those bugs — fixed or not — would no longer show up in any number
+in this report.** They were real, and the fixes were worth making (they
+still matter to anyone constructing `ra-common-cpp` envelopes directly,
+just not to this specific dispatch-only benchmark), but the dramatic
+before/after throughput swings originally attributed to them (~15,000 →
+~200,000 eps) are a construction-time story this pass's methodology can no
+longer reproduce or falsify — they're preserved in `METHODOLOGY.md` as
+historical record, not as evidence for anything measured on this page
+anymore. C++'s current `seq`/`par` cleanliness (see the latency table
+above) reflects dispatch-only cost, which was never what those three bugs
+were about.
 
-`seq` went from ~15,000 → ~136,000 (fix 1) → ~200,000 eps (fix 2, first
-measurement) across the first two fixes, all Docker-measured; later clean
-reruns put `seq` in the 125,000-135,000 range (see "reading this table
-honestly" on run-to-run noise at single-thread scale). After fix 3, `chan`
-jumped from 282,287 (1.42x) to **the 630,000-710,000 range across
-reruns — consistently ~5x over `seq`**, right in Rust/Go's range. `par` did
-*not* improve from fix 3 (still ~0.47x) — proof, not just inference, that
-the urandom mutex was never `par`'s problem: `par`'s bottleneck is the
-channel's own bounded-queue lock under Docker specifically (a native run of
-the identical binary shows `par` ≈ `seq`; see `METHODOLOGY.md`).
+## Rust: the `ra-common` rewire, revisited
 
-## Rust: the `ra-common` rewire
+An earlier pass of this report concluded rewiring `seda-bus-rust` onto
+`ra_common::Envelope` cost real throughput — `seq` 0.43-0.54x, `par` 0.72x,
+`chan` 0.40x versus the pre-rewire minimal struct — based on a
+construction-only micro-benchmark (`ra_common::Envelope::document()+content`
+~710-810k constructions/sec vs. the old struct's ~2.3-2.4M/sec, ~2.9-3.4x
+more expensive) plus the full, construction-inclusive bus numbers.
 
-`seda-bus-rust` was the one port never built on `ra-common` — its own
-minimal 7-field `Envelope` (`id`, `to`, `sender`, `headers`, `payload:
-Vec<u8>`, `slip: VecDeque<String>`, `attempts`). Asked directly whether
-rewiring it onto `ra-common-rust`'s richer `Envelope` (a routing slip,
-`Did`, headers map, document tree) would cost anything — "it's just code"
-— the honest answer needed a real rewire and a real measurement, not an
-inference. Both are done now (`ra_common::Envelope`, `make_envelope`/
-`envelope_payload`/`target_service` mirroring the other six ports'
-helpers, per-hop `attempts` moved onto the channel keyed by envelope id
-since `ra_common::Envelope` has none — same pattern as every other port).
+**That construction-cost gap is still real** — it hasn't been re-measured
+this pass and there's no reason to expect it changed — but **its
+consequence for this benchmark's dispatch numbers is now much less clear
+than the earlier pass concluded**, because the earlier pass's "dispatch"
+numbers had construction folded into them. This pass's construction-excluded
+`seq` throughput is 544,162 eps — *higher* than the old pre-rewire,
+construction-inclusive figure of 469,164 — which is hard to reconcile with
+"the rewire has a real, ongoing dispatch-time cost" as flatly stated
+before. The likely correct reading: most or all of the previously-measured
+"rewire cost" was construction cost, now properly excluded by design, not
+a genuine per-envelope dispatch-time tax from carrying a richer `Envelope`
+through the bus's scheduling path. This isn't re-confirmed with a fresh
+A/B test this pass (that would mean rebuilding the pre-rewire commit under
+the *current*, construction-excluding benchmark, which hasn't been done) —
+flagged as the natural next check, not asserted as settled.
 
-The first check was a construction-only micro-benchmark, and it said the
-rewire was free — `ra_common::Envelope::document()` even measured *faster*
-than the old struct. That check was run outside Docker, in this session's
-own sandboxed execution environment, which turned out to be a poor proxy:
-re-run inside Docker (this project's own canonical environment), the same
-construction-only comparison flips hard, consistently across four runs:
-
-```
-ra_common::Envelope::document()+content   ~710-810k constructions/sec
-seda_bus::Envelope::new() (old struct)    ~2.3-2.4M constructions/sec
-```
-
-`ra_common`'s construction is **~2.9-3.4x more expensive**, not faster —
-`Uuid::new_v4()` isn't the cost (isolated: ~2M/sec, plenty fast); it's the
-cumulative weight of `Did::default()`, a headers `Map::new()`, a
-`DocumentMessage`'s `Vec<Map>`, and — every publish — `ra_common`'s
-`DynamicRoutingSlip::next_route()` boxing the popped `Route` on the heap.
-The old struct's `to: String` + `VecDeque<String>` slip needed none of
-that. That gap shows up end-to-end: rewired `seq` throughput is 208,568
-eps versus the pre-rewire 469,164 (0.44x), `par` 516,836 versus 719,627
-(0.72x), `chan` 1,075,379 versus 2,725,588 (0.39x) — a real, consistent,
-Docker-verified cost, most pronounced exactly where construction cost sits
-most directly on the critical path (`seq`, `chan`'s many independent
-low-contention channels) and least pronounced where lock contention
-already dominates (`par`).
-
-**So: rewiring is not "just code" here — it has a real, now-measured
-throughput cost**, because `ra_common::Envelope` does more per envelope
-than a bus-specific minimal struct needs to. That's the same tradeoff
-every other `ra_common`-carrying port already made (see "Reading this
-table honestly" below for how that reframes the whole table); Rust is now
-consistent with the rest of the ecosystem instead of the one outlier, at
-the price this comparison exists to make visible.
+**This also means the previous pass's causal claim that the rewire
+triggers Rust's `seq` tail-stall needs the same re-verification** — see
+the latency section above.
 
 ## Mutex vs. lock-free: why the design is what it is
 
-`par`'s ceiling — real in every language, not just C++ — comes from a
-single mutex-guarded queue shared by every producer and consumer for a
-stage. That's the standard way to implement a bounded, backpressured
-multi-producer/multi-consumer queue (what every one of the seven ports
-does, including the Java original), not a deliberately introduced
-bottleneck: it makes correctness easy, `Block`/`DropOldest` back-pressure
-essentially free, and needs no dependency beyond each language's standard
-library. The cost is exactly what `par` measures — one serialization point,
-non-linear degradation under contention, worse under virtualization than
-native (confirmed this session). See `METHODOLOGY.md` for the full
-pros/cons and the lowest-risk improvement path (a two-lock queue, not a
-full lock-free rewrite).
+`par`'s ceiling — real in every language, not just C++, and unaffected by
+this pass's construction-exclusion fix — comes from a single mutex-guarded
+queue shared by every producer and consumer for a stage. That's the
+standard way to implement a bounded, backpressured multi-producer/
+multi-consumer queue (what every one of the seven ports does, including
+the Java original), not a deliberately introduced bottleneck: it makes
+correctness easy, `Block`/`DropOldest` back-pressure essentially free, and
+needs no dependency beyond each language's standard library. The cost is
+exactly what `par` measures — one serialization point, non-linear
+degradation under contention, worse under virtualization than native. See
+`METHODOLOGY.md` for the full pros/cons and the lowest-risk improvement
+path (a two-lock queue, not a full lock-free rewrite).
 
 ## Python: GIL vs. free-threaded
 
 `seda-bus-python`'s own README documents a real ~2.6x free-threading
 speedup on actual CPU-bound work (hashcash/fib). This benchmark's consumer
-does almost no CPU work, so `par` (one shared channel, GIL or not) mostly
-measures lock contention, not free-threading's benefit — 3.14t's `par` is
-0.97x for exactly that reason. `chan` (no shared lock) shows the real
-signal: 1.69x here, up to 3.40x in an isolated native check with more
-trials — free-threading working once there's no artificial contention
-point in the way. 3.13's GIL cost (0.29x/0.28x) is real in both
-configurations, since the GIL serializes bytecode execution independent of
-channel topology.
+does almost no CPU work, so these numbers are about lock/GIL contention
+under a channel, not that CPU-bound benefit. Under the corrected,
+construction-excluded methodology: 3.14t's `par` is now a real 0.45x
+collapse (was ~flat, 0.96-0.97x, when construction cost was diluting each
+timed iteration) — free-threaded Python's shared-channel contention is
+more exposed once producers aren't throttled by construction. `chan` (no
+shared lock) still shows the real signal: 2.55x here. 3.13's GIL collapse
+is real in both configurations (`par` 0.68x, `chan` 0.67x) — milder than
+previously reported (0.31x/0.33x) for the same reason as above, not
+because the GIL got less serializing.
 
-## TypeScript: `chan` helps even with zero real OS parallelism
+## TypeScript: `chan` still helps, `par` is no longer flat
 
-`ts`'s `par` is flat (1.01x, expected — Node is single-threaded, `par`
-means concurrent async tasks not OS parallelism). `chan` still shows a
-real 3.37x gain with **no CPU parallelism available at all** — a single
-heavily-contended channel carries real per-operation coordination overhead
-(permit-checking, promise/microtask scheduling) beyond lock-waiting, and
-splitting work across independent channels reduces that overhead even on
-one thread.
+Under the old, construction-inclusive methodology, `ts`'s `par` measured
+flat (1.01x, attributed to Node's single-threaded event loop meaning
+`par`'s "producers" are concurrent async tasks, not OS parallelism, so
+there was assumed to be nothing for more of them to contend over). Under
+the corrected methodology, `par` is a real 0.67x collapse — once producers
+publish as fast as the pre-built envelopes allow rather than being paced
+by `makeEnvelope()`'s own construction cost, 8 concurrent async producer
+loops sharing one channel genuinely cost more (promise/microtask
+scheduling overhead, `await` handoffs) than 1 loop does. `chan` still
+shows a strong real gain (5.75x, the best ratio in this report) with **no
+CPU parallelism available at all** — splitting work across independent
+channels still reduces per-operation coordination overhead even on one
+thread, exactly as previously found; that part of the finding holds.
 
 ## Other attributes
 
 Pulled from [`seda-bus/DESIGN.md`](../DESIGN.md)'s own comparison table
 (§2.1) — the maintained source, not re-derived here — plus three new
-columns.
+columns. Unaffected by this pass's benchmark methodology change.
 
 |                                   |              Java |        Rust |               Python |         TypeScript |                                        C++ |                  C# |                                       Go |
-|-----------------------------------|------------------:|------------:|---------------------:|-------------------:|-------------------------------------------:|--------------------:|-----------------------------------------:|
-| Version                           |             1.3.1 |       0.4.0 |                0.2.0 |              0.2.0 |                                      0.1.0 |               0.1.0 |                                    0.1.0 |
-| Source LOC                        |               962 |         743 |                  595 |                835 |                                        744 |                 620 |                                      739 |
-| Integration tests                 |                 8 |           9 |                   11 |                 16 |                                         13 |                  13 |                                       13 |
-| Runtime deps beyond `ra-common-*` |                 0 |       `log` |                    0 |                  0 |                                          0 |                   0 |                                        0 |
-| Envelope source                   |       `ra-common` | `ra-common` |          `ra-common` |        `ra-common` |                            `ra-common-cpp` |      `ra-common-cs` |                           `ra-common-go` |
-| Worker pool                       | `ExecutorService` | hand-rolled | `ThreadPoolExecutor` |         event loop |                                hand-rolled | shared `ThreadPool` |                        none (goroutines) |
-| True stage parallelism            |               yes |         yes |   only free-threaded | worker stages only |                                        yes |                 yes |                                      yes |
-| Race/sanitizer-verified           |           not run |     not run |              not run |            not run | attempted, untrustworthy (TSan, sandboxed) |             not run | **yes** (`go test -race`, clean, 5 runs) |
-| Guaranteed delivery               |               yes |          no |                   no |                 no |                                         no |                  no |                                       no |
+|-----------------------------------|-------------------:|------------:|---------------------:|-------------------:|-------------------------------------------:|--------------------:|-----------------------------------------:|
+| Version                           |               1.3.1 |       0.4.0 |                0.2.0 |              0.2.0 |                                      0.1.0 |               0.1.0 |                                    0.1.0 |
+| Source LOC                        |                 962 |         743 |                  595 |                835 |                                        744 |                 620 |                                      739 |
+| Integration tests                 |                   8 |           9 |                   11 |                 16 |                                         13 |                  13 |                                       13 |
+| Runtime deps beyond `ra-common-*` |                   0 |       `log` |                    0 |                  0 |                                          0 |                   0 |                                        0 |
+| Envelope source                   |         `ra-common` | `ra-common` |          `ra-common` |        `ra-common` |                            `ra-common-cpp` |      `ra-common-cs` |                           `ra-common-go` |
+| Worker pool                       |  `ExecutorService` | hand-rolled | `ThreadPoolExecutor` |         event loop |                                hand-rolled | shared `ThreadPool` |                        none (goroutines) |
+| True stage parallelism            |                 yes |         yes |   only free-threaded | worker stages only |                                        yes |                 yes |                                      yes |
+| Race/sanitizer-verified           |             not run |     not run |              not run |            not run | attempted, untrustworthy (TSan, sandboxed) |             not run | **yes** (`go test -race`, clean, 5 runs) |
+| Guaranteed delivery               |                 yes |          no |                    no |                 no |                                          no |                  no |                                       no |
 
 Source LOC: `wc -l` over each port's library source only — see
 [`scripts/count_loc.sh`](scripts/count_loc.sh).
 
 ## Reading this table honestly
 
-Rust and Go's `chan` numbers being 5-8x, well ahead of Java/C#'s 2.6-2.9x,
-is a real, structural result (both compile to native code with real OS
-threads and no GC pause risk). Within the `ra-common`-carrying
-implementations, don't read close percentage differences between adjacent
-rows as meaningful given three trials on a single host; do read
-order-of-magnitude differences, `par`-vs-`chan` gaps, and collapses as
-real — every one reported here was independently checked against a clean,
-isolated measurement, not assumed from a single run.
+**This report has now been substantially wrong, corrected, and rewritten
+twice** — first a contaminated-host measurement artifact (Rust's `par`
+looking flat), second (this pass) a construction/dispatch conflation that
+was folded into every single number and one standing qualitative claim.
+Both were caught by direct, specific pushback, not self-discovered. The
+lesson compounds rather than repeats: a "verified" result is only as
+trustworthy as the environment *and the methodology* it was verified
+under, and this report's own history is now evidence for that claim, not
+just an assertion of it.
 
-**This section previously carried a claim, then a retraction, about
-whether Rust's own envelope mattered — both were wrong in the same way:
-checked once, outside this project's own canonical environment, and
-trusted too soon.** The first draft asserted (unmeasured) that
-`seda-bus-rust`'s minimal struct explained part of its lead. Challenged
-directly — "it's just code" — a construction-only micro-benchmark said no,
-`ra_common`'s construction was if anything *faster*, and the claim was
-retracted. That micro-benchmark ran natively, in this session's own
-sandboxed shell, not in Docker; re-run inside Docker, the result reversed
-completely (`ra_common` construction ~2.9-3.4x *more* expensive,
-consistent across four runs — see "Rust: the `ra-common` rewire" above)
-and the full rewired bus confirmed it end-to-end. The lesson generalizes
-past Rust: a "verified" result is only as trustworthy as the environment
-it was verified in, and this report's own native-vs-Docker gap (already
-documented for C++'s `par` collapse) applies to *any* number measured
-outside Docker here, not just throughput — this session just hadn't hit
-it on a construction micro-benchmark until now. Every environment-crossing
-claim from here forward gets checked in Docker before being trusted.
+Within the `ra-common`-carrying implementations, don't read close
+percentage differences between adjacent rows as meaningful given three
+trials on a single host; do read order-of-magnitude differences,
+`par`-vs-`chan` gaps, and the clean/tail-stall/backlog classification in
+the latency section as real — every qualitative claim in this pass was
+checked against the elapsed-time ratio, not assumed from a raw number.
 
-The same applies to the latency table: read the multi-second `seq`/`par`
-numbers for TS/Python as a real backlog finding (order-of-magnitude, and
-reproduced across trials), not as a precise "TypeScript takes 5.87 seconds
-to process an envelope" claim — see "Latency" above and `bench/WORKLOAD.md`
-for why this benchmark's capacity choice makes queueing delay, not raw
-dispatch cost, the dominant signal whenever a producer outruns its
-consumer.
+Read the multi-second `seq`/`par`/`chan` numbers for TS/Python as a real
+backlog finding (order-of-magnitude, reproduced across trials and now
+confirmed to also apply, at a smaller magnitude, to several compiled
+implementations), not as precise per-envelope claims — see "Latency" above
+and `bench/WORKLOAD.md` for why this benchmark's capacity choice makes
+queueing delay, not raw dispatch cost, the dominant signal whenever a
+producer can outrun its consumer, which construction-exclusion just made
+possible for several implementations that previously never triggered it.

@@ -18,6 +18,14 @@ import (
 const total = 200_000
 const trials = 3
 
+// Pre-building `total` envelopes is itself a burst of allocation right
+// before the timed window starts; without a settle pause + explicit GC, a
+// collection provoked by that burst can land inside the first few timed
+// publishes instead (caught happening - inconsistently, across several
+// languages - the first time this benchmark measured envelope construction
+// separately from dispatch). See ../WORKLOAD.md.
+const settle = 200 * time.Millisecond
+
 // refT is the arbitrary per-process origin for latency timestamps - only
 // ever diffed within this process. time.Since uses the monotonic reading
 // carried inside a time.Time obtained via time.Now(), so this stays
@@ -76,20 +84,37 @@ func runShared(config string, producers int) result {
 	perProducer := total / producers
 	remainder := total - perProducer*producers
 
-	start := time.Now()
-	var wg sync.WaitGroup
+	// Pre-build every envelope before the timed window starts - this
+	// benchmark measures bus dispatch/queueing overhead, not envelope
+	// construction cost. In production the producer already holds a
+	// constructed envelope before it ever calls publish(). See
+	// ../WORKLOAD.md.
+	perProducerEnvelopes := make([][]*sedabus.Envelope, producers)
 	for p := 0; p < producers; p++ {
 		n := perProducer
 		if p == 0 {
 			n += remainder
 		}
+		envs := make([]*sedabus.Envelope, n)
+		for i := 0; i < n; i++ {
+			envs[i] = sedabus.MakeEnvelope("bench", int64(0))
+		}
+		perProducerEnvelopes[p] = envs
+	}
+
+	runtime.GC()
+	time.Sleep(settle)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
 		wg.Add(1)
-		go func(n int) {
+		go func(envs []*sedabus.Envelope) {
 			defer wg.Done()
-			for i := 0; i < n; i++ {
-				bus.Publish(sedabus.MakeEnvelope("bench", nowNanos()), &timeout)
+			for _, env := range envs {
+				sedabus.SetPayload(env, nowNanos())
+				bus.Publish(env, &timeout)
 			}
-		}(n)
+		}(perProducerEnvelopes[p])
 	}
 	wg.Wait()
 	drained := bus.Shutdown(60 * time.Second)
@@ -134,22 +159,36 @@ func runIndependentChannels(producers int) result {
 		})
 	}
 
-	timeout := 5 * time.Second
-	start := time.Now()
-	var wg sync.WaitGroup
+	// Pre-build every envelope before the timed window starts - see the
+	// comment in runShared.
+	perChannelEnvelopes := make([][]*sedabus.Envelope, producers)
 	for c := 0; c < producers; c++ {
 		name := fmt.Sprintf("bench%d", c)
 		n := perChannel
 		if c == 0 {
 			n += remainder
 		}
+		envs := make([]*sedabus.Envelope, n)
+		for i := 0; i < n; i++ {
+			envs[i] = sedabus.MakeEnvelope(name, int64(0))
+		}
+		perChannelEnvelopes[c] = envs
+	}
+
+	timeout := 5 * time.Second
+	runtime.GC()
+	time.Sleep(settle)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for c := 0; c < producers; c++ {
 		wg.Add(1)
-		go func(name string, n int) {
+		go func(envs []*sedabus.Envelope) {
 			defer wg.Done()
-			for i := 0; i < n; i++ {
-				bus.Publish(sedabus.MakeEnvelope(name, nowNanos()), &timeout)
+			for _, env := range envs {
+				sedabus.SetPayload(env, nowNanos())
+				bus.Publish(env, &timeout)
 			}
-		}(name, n)
+		}(perChannelEnvelopes[c])
 	}
 	wg.Wait()
 	drained := bus.Shutdown(60 * time.Second)

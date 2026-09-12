@@ -5,6 +5,7 @@ Imports seda_bus/ra_common directly off their src/ trees (sys.path, not an
 installed package) so this needs no venv/build step — just python3.13+.
 """
 
+import gc
 import json
 import os
 import sys
@@ -16,10 +17,23 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "seda-bus-python", "src
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "..", "common", "ra-common-python", "src"))
 
 from seda_bus import SEDABus, make_envelope  # noqa: E402
-from seda_bus.envelope import envelope_payload  # noqa: E402
+from seda_bus.envelope import envelope_payload, set_payload  # noqa: E402
 
 TOTAL = 200_000
 TRIALS = 3
+
+# Pre-building TOTAL envelopes is itself a burst of allocation right before
+# the timed window starts; without a settle pause + explicit GC, a
+# collection provoked by that burst can land inside the first few timed
+# publishes instead (caught happening - inconsistently, across several
+# languages - the first time this benchmark measured envelope construction
+# separately from dispatch). See ../WORKLOAD.md.
+SETTLE_S = 0.2
+
+
+def _settle() -> None:
+    gc.collect()
+    time.sleep(SETTLE_S)
 
 
 def _version_fields() -> dict:
@@ -73,15 +87,26 @@ def run_shared(config: str, producers: int) -> dict:
     per_producer = TOTAL // producers
     remainder = TOTAL - per_producer * producers
 
-    def produce(n):
-        for i in range(n):
-            bus.publish(make_envelope("bench", _now_ns()), timeout=5.0)
+    # Pre-build every envelope before the timed window starts - this
+    # benchmark measures bus dispatch/queueing overhead, not envelope
+    # construction cost. In production the producer already holds a
+    # constructed envelope before it ever calls publish(). See
+    # ../WORKLOAD.md.
+    per_producer_envelopes = []
+    for p in range(producers):
+        n = per_producer + (remainder if p == 0 else 0)
+        per_producer_envelopes.append([make_envelope("bench", 0) for _ in range(n)])
 
+    def produce(envs):
+        for env in envs:
+            set_payload(env, _now_ns())
+            bus.publish(env, timeout=5.0)
+
+    _settle()
     start = time.perf_counter()
     threads = []
     for p in range(producers):
-        n = per_producer + (remainder if p == 0 else 0)
-        t = threading.Thread(target=produce, args=(n,))
+        t = threading.Thread(target=produce, args=(per_producer_envelopes[p],))
         threads.append(t)
         t.start()
     for t in threads:
@@ -140,16 +165,24 @@ def run_independent_channels(producers: int) -> dict:
 
         bus.subscribe(name, make_consumer(c))
 
-    def produce(name, n):
-        for i in range(n):
-            bus.publish(make_envelope(name, _now_ns()), timeout=5.0)
-
-    start = time.perf_counter()
-    threads = []
+    # Pre-build every envelope before the timed window starts - see the
+    # comment in run_shared.
+    per_channel_envelopes = []
     for c in range(producers):
         name = f"bench{c}"
         n = per_channel + (remainder if c == 0 else 0)
-        t = threading.Thread(target=produce, args=(name, n))
+        per_channel_envelopes.append([make_envelope(name, 0) for _ in range(n)])
+
+    def produce(envs):
+        for env in envs:
+            set_payload(env, _now_ns())
+            bus.publish(env, timeout=5.0)
+
+    _settle()
+    start = time.perf_counter()
+    threads = []
+    for c in range(producers):
+        t = threading.Thread(target=produce, args=(per_channel_envelopes[c],))
         threads.append(t)
         t.start()
     for t in threads:
