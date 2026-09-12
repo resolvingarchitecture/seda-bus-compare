@@ -145,32 +145,32 @@ apart from a truly clean run (both low), the table below reports each
 the run pulls both `p50` and `max` up together; an isolated stall pulls
 only `max` up; a clean run pulls neither up.
 
-| Implementation    | Config | mean elapsed (ms) | p50/elapsed | max/elapsed | Read as                          |
-|-------------------|--------|-------------------:|------------:|------------:|-----------------------------------|
-| C++                | seq    |             1,142.0 |        0.00 |        0.01 | clean                             |
-| C++                | par    |             2,898.7 |        0.00 |        0.06 | clean, mild tail                  |
-| Java               | par    |               361.0 |        0.00 |        0.03 | clean                             |
-| C#                 | par    |               733.0 |        0.00 |        0.11 | clean, mild tail                  |
-| Rust               | par    |               434.7 |        0.00 |        0.16 | tail-only stall                   |
-| Rust               | seq    |               368.7 |        0.01 |        0.17 | tail-only stall                   |
-| C#                 | chan   |               517.0 |        0.01 |        0.36 | tail-only stall (large tail)      |
-| Java               | seq    |               233.3 |        0.05 |        0.11 | mild backlog                      |
-| C++                | chan   |               526.7 |        0.11 |        0.61 | **real backlog**                  |
-| Go                 | par    |               484.3 |        0.11 |        0.21 | mild-to-real backlog              |
-| Java               | chan   |               106.3 |        0.17 |        0.58 | **real backlog**                  |
-| Python 3.14t       | seq    |             1,958.0 |        0.14 |        0.24 | real backlog                      |
-| C#                 | seq    |               753.7 |        0.26 |        0.58 | **real backlog**                  |
-| Python 3.14t       | chan   |               769.0 |        0.23 |        0.47 | real backlog                      |
-| Python 3.14t       | par    |             4,360.7 |        0.26 |        0.37 | real backlog                      |
-| Go                 | chan   |               113.3 |        0.34 |        0.66 | **real backlog**                  |
-| Go                 | seq    |               494.0 |        0.35 |        0.61 | **real backlog**                  |
-| Rust               | chan   |               309.7 |        0.37 |        0.73 | **real backlog**                  |
-| Python 3.13 (GIL)  | par    |             5,525.3 |        0.35 |        0.64 | real backlog                      |
-| TypeScript         | chan   |             1,610.7 |        0.37 |        0.73 | real backlog                      |
-| Python 3.13 (GIL)  | seq    |             3,765.3 |        0.15 |        0.32 | real backlog                      |
-| Python 3.13 (GIL)  | chan   |             5,613.7 |        0.50 |        0.87 | **real backlog**                  |
-| TypeScript         | seq    |             9,254.3 |        0.48 |        0.68 | **real backlog**                  |
-| TypeScript         | par    |            13,854.7 |        0.48 |        0.69 | **real backlog**                  |
+| Implementation     | Config |   mean elapsed (ms) |  p50/elapsed |  max/elapsed | Read as                            |
+|--------------------|--------|--------------------:|-------------:|-------------:|------------------------------------|
+| C++                | seq    |             1,142.0 |         0.00 |         0.01 | clean                              |
+| C++                | par    |             2,898.7 |         0.00 |         0.06 | clean, mild tail                   |
+| Java               | par    |               361.0 |         0.00 |         0.03 | clean                              |
+| C#                 | par    |               733.0 |         0.00 |         0.11 | clean, mild tail                   |
+| Rust               | par    |               434.7 |         0.00 |         0.16 | tail-only stall                    |
+| Rust               | seq    |               368.7 |         0.01 |         0.17 | tail-only stall                    |
+| C#                 | chan   |               517.0 |         0.01 |         0.36 | tail-only stall (large tail)       |
+| Java               | seq    |               233.3 |         0.05 |         0.11 | mild backlog                       |
+| C++                | chan   |               526.7 |         0.11 |         0.61 | **real backlog**                   |
+| Go                 | par    |               484.3 |         0.11 |         0.21 | mild-to-real backlog               |
+| Java               | chan   |               106.3 |         0.17 |         0.58 | **real backlog**                   |
+| Python 3.14t       | seq    |             1,958.0 |         0.14 |         0.24 | real backlog                       |
+| C#                 | seq    |               753.7 |         0.26 |         0.58 | **real backlog**                   |
+| Python 3.14t       | chan   |               769.0 |         0.23 |         0.47 | real backlog                       |
+| Python 3.14t       | par    |             4,360.7 |         0.26 |         0.37 | real backlog                       |
+| Go                 | chan   |               113.3 |         0.34 |         0.66 | **real backlog**                   |
+| Go                 | seq    |               494.0 |         0.35 |         0.61 | **real backlog**                   |
+| Rust               | chan   |               309.7 |         0.37 |         0.73 | **real backlog**                   |
+| Python 3.13 (GIL)  | par    |             5,525.3 |         0.35 |         0.64 | real backlog                       |
+| TypeScript         | chan   |             1,610.7 |         0.37 |         0.73 | real backlog                       |
+| Python 3.13 (GIL)  | seq    |             3,765.3 |         0.15 |         0.32 | real backlog                       |
+| Python 3.13 (GIL)  | chan   |             5,613.7 |         0.50 |         0.87 | **real backlog**                   |
+| TypeScript         | seq    |             9,254.3 |         0.48 |         0.68 | **real backlog**                   |
+| TypeScript         | par    |            13,854.7 |         0.48 |         0.69 | **real backlog**                   |
 
 **C++ `seq`/`par` are the only two cases in the whole report that are
 genuinely clean** — its single/shared-channel consumer path keeps pace
@@ -231,26 +231,97 @@ hand-waved.
 
 **Throughput table**
 
-| Anomaly | Explanation |
-|---|---|
-| C++ `par` (68,998) is *lower* than C++ `seq` (175,861) — adding 8 producers made it slower | Real, reproduces every pass regardless of methodology changes. `par` puts all 8 producers/workers behind one mutex-guarded queue; under Docker's virtualization specifically, contention on that one lock costs more than the parallelism gains. A native (non-containerized) run of the same binary shows `par` ≈ `seq` — see `METHODOLOGY.md` and "Mutex vs. lock-free" below. |
-| C# `par` (273,234) is flat against `seq` (272,740), ~1.00x — no gain *and* no collapse, unlike C++'s hard collapse under the same design | C#'s shared-queue design is structurally identical to C++'s (one mutex-guarded queue, 8 workers). That it doesn't collapse the way C++ does is itself notable — see the matching latency anomaly below (C# `par`'s tail starts far later than C++'s), which points at .NET's `Monitor`/lock primitive spinning before it blocks, unlike C++'s `std::mutex`/condvar. Not independently verified this pass (would need a targeted lock-primitive test, not run) — the leading explanation, not a confirmed one. |
-| Go `par` (412,299) barely beats Go `seq` (408,140), ~1.01x — looks like Go gets nothing from parallelism | Misleading, not wrong: Go's `seq` is *itself* already backlogged (172ms mean `p50`, a real sustained-backlog case — see the classification table above), not a clean baseline. Comparing `par` against an already-degraded `seq` produces a ratio that says nothing about whether parallelism helped; compare Go's `chan` (1,759,884, 4.31x) against `seq` instead, or read `par`'s own absolute number on its own terms. |
-| Rust `chan` (645,609) is far behind Java's (1,968,262) and Go's (1,759,884), despite Rust being the systems-level, no-GC implementation | Rust's `chan` shows a real, sustained backlog (`p50` 114,914.7us, 37% of trial duration — see the classification table) — each of its 8 independent per-channel consumers can't keep pace with its own producer once construction no longer throttles publish rate. This is a genuine per-channel dispatch-cost finding in `seda-bus-rust`, not measurement noise; not profiled further this pass to find the specific hot path — flagged as a concrete follow-up, not closed. |
-| TypeScript's `chan`-vs-`seq` ratio (5.75x) is the *best* in the whole report, despite Node being single-threaded with zero real OS parallelism | Real, and previously found, but the ratio is inflated by a badly-degraded `seq`/`par` baseline (both already deep in multi-second backlog — see the latency table), not by `chan` being exceptional in absolute terms: TS's `chan` throughput (124,338) is still the lowest of all eight implementations. Read the ratio and the absolute number as answering different questions — this report's own standing caution, restated here because this is the sharpest example of it. |
+| Anomaly                                                                                                                                        | Explanation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| C++ `par` (68,998) is *lower* than C++ `seq` (175,861) — adding 8 producers made it slower                                                     | Real, reproduces every pass regardless of methodology changes. `par` puts all 8 producers/workers behind one mutex-guarded queue; under Docker's virtualization specifically, contention on that one lock costs more than the parallelism gains. A native (non-containerized) run of the same binary shows `par` ≈ `seq` — see `METHODOLOGY.md` and "Mutex vs. lock-free" below.                                                                                                                              |
+| C# `par` (273,234) is flat against `seq` (272,740), ~1.00x — no gain *and* no collapse, unlike C++'s hard collapse under the same design       | C#'s shared-queue design is structurally identical to C++'s (one mutex-guarded queue, 8 workers). That it doesn't collapse the way C++ does is itself notable — see the matching latency anomaly below (C# `par`'s tail starts far later than C++'s), which points at .NET's `Monitor`/lock primitive spinning before it blocks, unlike C++'s `std::mutex`/condvar. Not independently verified this pass (would need a targeted lock-primitive test, not run) — the leading explanation, not a confirmed one. |
+| Go `par` (412,299) barely beats Go `seq` (408,140), ~1.01x — looks like Go gets nothing from parallelism                                       | Misleading, not wrong: Go's `seq` is *itself* already backlogged (172ms mean `p50`, a real sustained-backlog case — see the classification table above), not a clean baseline. Comparing `par` against an already-degraded `seq` produces a ratio that says nothing about whether parallelism helped; compare Go's `chan` (1,759,884, 4.31x) against `seq` instead, or read `par`'s own absolute number on its own terms.                                                                                     |
+| Rust `chan` (645,609) is far behind Java's (1,968,262) and Go's (1,759,884), despite Rust being the systems-level, no-GC implementation        | Rust's `chan` shows a real, sustained backlog (`p50` 114,914.7us, 37% of trial duration — see the classification table) — see the matching latency-table row below for the tested mechanism (each channel's hard `concurrency(1)` isolation can't borrow spare capacity the way `par`'s single shared queue can; not a bug, a real tradeoff of the design). |
+| TypeScript's `chan`-vs-`seq` ratio (5.75x) is the *best* in the whole report, despite Node being single-threaded with zero real OS parallelism | Real, and previously found, but the ratio is inflated by a badly-degraded `seq`/`par` baseline (both already deep in multi-second backlog — see the latency table), not by `chan` being exceptional in absolute terms: TS's `chan` throughput (124,338) is still the lowest of all eight implementations. Read the ratio and the absolute number as answering different questions — this report's own standing caution, restated here because this is the sharpest example of it.                             |
 
 **Latency table**
 
-| Anomaly | Explanation |
-|---|---|
-| Rust `par`: `p50` is tiny (61.1us) but `p99` jumps to 66,075.7us — a ~1,000x cliff between the 50th and 99th percentile | A small fraction of envelopes (roughly the top 1%) get caught behind a producer or consumer thread that the OS/Docker scheduler preempted while it held (or was waiting on) the shared queue's lock; the other ~99% dispatch in microseconds. Same mechanism as `par`'s throughput collapse above — one shared mutex, worse under virtualization — just visible here as a latency cliff instead of a throughput number. |
-| C++ `par`: identical shape, worse magnitude — `p50` 13.6us, `p99` 153,688.0us (~154ms) | Same mechanism as the Rust `par` row above, more severe — consistent with C++'s `par` also showing this report's single worst throughput collapse (0.39x). The cliff's severity tracks the throughput collapse's severity across every language that has one. |
-| Java `par` does *not* show this cliff — `p50` 1,123.9us, `p99` 5,204.0us, `max` 9,468.1us, all within one order of magnitude — despite using the *same* single-shared-queue design as Rust and C++ | The leading explanation, consistent with this session's own earlier, directly-tested finding on `seda-bus-rust`'s pool (see the git history on `seda-bus-rust`'s reverted `crossbeam-channel` experiment): JVM's `ExecutorService`/`LockSupport` spin briefly before making an OS-level park/wake call, while Rust's raw `std::sync::mpsc` (and C++'s `std::mutex`/condvar) park immediately with no spin phase, paying the full cost of a Docker-VM-level thread wake on contention. Not independently re-tested against `par` specifically this pass — inferred from the earlier, directly-tested mechanism, not re-verified here. |
-| C# `par`'s tail starts *later* than Rust/C++'s — `p50` 15.8us, `p99` only 1,805.3us, then a real jump to `p999` 35,645.0us | A thinner tail than Rust/C++ (roughly the top 0.1-1% affected, not the top 1%), consistent with .NET's `Monitor.Enter` also spinning before it blocks — the same mechanism proposed for C#'s flat throughput ratio above, and the two anomalies corroborate each other. Same caveat: leading explanation, not independently confirmed this pass. |
+| Anomaly                                                                                                                                                                                                    | Explanation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Rust `par`: `p50` is tiny (61.1us) but `p99` jumps to 66,075.7us — a ~1,000x cliff between the 50th and 99th percentile                                                                                    | A small fraction of envelopes (roughly the top 1%) get caught behind a producer or consumer thread that the OS/Docker scheduler preempted while it held (or was waiting on) the shared queue's lock; the other ~99% dispatch in microseconds. Same mechanism as `par`'s throughput collapse above — one shared mutex, worse under virtualization — just visible here as a latency cliff instead of a throughput number.                                                                                                                                                                                                                                                                   |
+| C++ `par`: identical shape, worse magnitude — `p50` 13.6us, `p99` 153,688.0us (~154ms)                                                                                                                     | Same mechanism as the Rust `par` row above, more severe — consistent with C++'s `par` also showing this report's single worst throughput collapse (0.39x). The cliff's severity tracks the throughput collapse's severity across every language that has one.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Java `par` does *not* show this cliff — `p50` 1,123.9us, `p99` 5,204.0us, `max` 9,468.1us, all within one order of magnitude — despite using the *same* single-shared-queue design as Rust and C++         | The leading explanation, consistent with this session's own earlier, directly-tested finding on `seda-bus-rust`'s pool (see the git history on `seda-bus-rust`'s reverted `crossbeam-channel` experiment): JVM's `ExecutorService`/`LockSupport` spin briefly before making an OS-level park/wake call, while Rust's raw `std::sync::mpsc` (and C++'s `std::mutex`/condvar) park immediately with no spin phase, paying the full cost of a Docker-VM-level thread wake on contention. This describes why the runtimes differ, not a recommendation that Rust or C++ should adopt Java's approach — each port implements SEDA by its own best-fitting means, and a spin-before-park primitive is a real CPU-vs-latency tradeoff (see `seda-bus-rust`'s reverted `crossbeam-channel` experiment: it reduced one stall but cost `par` throughput elsewhere), not a strictly better default. Not independently re-tested against `par` specifically this pass — inferred from the earlier, directly-tested mechanism, not re-verified here. |
+| C# `par`'s tail starts *later* than Rust/C++'s — `p50` 15.8us, `p99` only 1,805.3us, then a real jump to `p999` 35,645.0us                                                                                 | A thinner tail than Rust/C++ (roughly the top 0.1-1% affected, not the top 1%), consistent with .NET's `Monitor.Enter` also spinning before it blocks — the same mechanism proposed for C#'s flat throughput ratio above, and the two anomalies corroborate each other. Same caveat: leading explanation, not independently confirmed this pass.                                                                                                                                                                                                                                                                                                                                          |
 | `seq` shows a real, sustained backlog in Go, C#, Python (both variants), and TypeScript, and a milder one in Java — five of eight implementations, on the *simplest* configuration (1 producer, 1 channel) | One unifying mechanism, not five coincidences: `seq` runs with exactly one consumer/worker thread in every port's design (mirrored from the original Java `SEDABus`). Once a producer isn't throttled by envelope construction, any implementation whose single-worker dispatch loop has real per-item cost (a channel poll, an atomic increment, invoking the consumer callback) gets outrun by a producer that can now publish as fast as a bare field-write allows, and the backlog persists for the whole trial. C++ and (mostly) Rust are the only two implementations whose single-consumer dispatch path is fast enough to never fall behind — see the classification table above. |
-| `chan` also shows real backlog in Rust, C++, and partially Java — the configuration this report has repeatedly called "no artificial contention point left to hide behind" | A *different* mechanism from the `seq` case above, not the same one recurring: `chan` gives each producer its own dedicated consumer (8 independent workers, not a single cold one), so this isn't a single-thread pacing problem. It means each individual channel's own per-item consumer dispatch cost, multiplied across 8 fully independent channels all running flat-out, is high enough that even a *dedicated* consumer can't keep pace with its own producer. Genuinely new information about per-channel dispatch cost in these three ports, not previously visible because construction cost used to mask it. |
-| C++ `seq`: `p999` is 518.4us but `max` jumps to 11,358.6us — a ~22x jump at the very top, despite `seq` otherwise being this report's cleanest case | An isolated, rare single-envelope outlier — almost certainly the same class of "first worker activation" cold-start artifact documented for Rust's `seq` (see above), just far less frequent for C++, whose dispatch path is fast enough to absorb it into `p999` for two of three trials and only shows it in `max`. Not selectively excluded from the table — reported as-is, per this report's own standard of not discarding inconvenient numbers. |
-| Python 3.13 (GIL) and TypeScript's raw latency numbers are in the millions of microseconds (multi-second `p50`s) | Not new to this pass and not an error — both are genuine, previously-documented backlog findings (GIL serialization for Python, single-threaded event-loop serialization for TS) that predate this pass's construction-exclusion fix and are unaffected by it. Restated here only as a pointer for anyone jumping straight to the table without the surrounding prose: see "Python: GIL vs. free-threaded" and "TypeScript: `chan` still helps, `par` is no longer flat" below for the detail. |
+| `chan` also shows real backlog in Rust and C++ (and partially Java) — the configuration this report has repeatedly called "no artificial contention point left to hide behind," and throughput-wise `chan` is *faster* than `seq` for these same three, which looks contradictory next to a worse `p50` | Not contradictory (Little's law: more total work finished per second while individual items each wait longer just means a bigger backlog is being sustained throughout), and **root-caused, not just explained** — see "Thread/channel count must stay within the host's core budget" below for the full investigation and the measured fix. Short version: `chan`'s 8 channels need 16 concurrently-progressing threads (8 producers + 8 dedicated consumers) on a host with only 12 real cores; cutting channel count to fit that budget recovers most of the latency, at no throughput cost. Two other hypotheses were tested and ruled out first (resubmission frequency through the shared job queue; hard per-channel `concurrency(1)` isolation preventing cross-channel work-stealing) before landing on the confirmed cause. |
+| C++ `seq`: `p999` is 518.4us but `max` jumps to 11,358.6us — a ~22x jump at the very top, despite `seq` otherwise being this report's cleanest case                                                        | An isolated, rare single-envelope outlier — almost certainly the same class of "first worker activation" cold-start artifact documented for Rust's `seq` (see above), just far less frequent for C++, whose dispatch path is fast enough to absorb it into `p999` for two of three trials and only shows it in `max`. Not selectively excluded from the table — reported as-is, per this report's own standard of not discarding inconvenient numbers.                                                                                                                                                                                                                                    |
+| Python 3.13 (GIL) and TypeScript's raw latency numbers are in the millions of microseconds (multi-second `p50`s)                                                                                           | Not new to this pass and not an error — both are genuine, previously-documented backlog findings (GIL serialization for Python, single-threaded event-loop serialization for TS) that predate this pass's construction-exclusion fix and are unaffected by it. Restated here only as a pointer for anyone jumping straight to the table without the surrounding prose: see "Python: GIL vs. free-threaded" and "TypeScript: `chan` still helps, `par` is no longer flat" below for the detail.                                                                                                                                                                                            |
+
+## Thread/channel count must stay within the host's core budget
+
+`chan`'s real backlog (see the latency table and classification above) was
+initially assumed to be an architectural property of "one shared pool,
+hard per-channel isolation" — a real but unavoidable tradeoff. **Pushed on
+directly — "there is no way 8 threads draining 200k messages is slower
+than 1 thread; if that's the case, the implementation is bust" — that
+assumption doesn't survive testing.** Root-caused properly, in order:
+
+1. **Ruled out: job-queue resubmission frequency.** `seda-bus-rust`'s pool
+   resubmits a channel's drain task through one shared job queue every
+   `BATCH` envelopes. Raising `BATCH` 512x (16 → 8192, cutting total
+   resubmissions from ~12,500 to ~25) left `chan`'s `p50` unchanged
+   (114,914.7us → ~116,000us).
+2. **Ruled out: the shared `Pool` itself.** Replaced the single `Bus`
+   shared across all 8 channels with 8 fully independent `Bus` instances —
+   own `Pool`, own worker thread, zero shared state of any kind, one per
+   channel, all run concurrently. Latency was statistically identical to
+   the shared-pool version (`p50` ~92-140us range either way; see the raw
+   diagnostic run). This rules out the pool/scheduling design as the
+   cause, full stop — there was nothing left to share.
+3. **Ruled out: hard `concurrency(1)` per-channel isolation preventing
+   work-stealing.** Raised each channel's concurrency ceiling to match the
+   pool size (8), so any idle worker could in principle pile onto a
+   backlogged channel exactly like `par`'s single channel does. No
+   meaningful change (`p50` still 123,142.3-142,532.9us). This makes sense
+   in hindsight: work-stealing only helps when load is *imbalanced* — here
+   all 8 producers publish simultaneously and symmetrically, so there is no
+   idle channel's slack to borrow in the first place.
+4. **Confirmed: thread count exceeding the host's real core count.** This
+   Docker Desktop VM has 12 cores (`docker info --format '{{.NCPU}}'`,
+   confirmed twice). `chan` with 8 channels needs 16 threads (8 producers +
+   8 dedicated consumers) making simultaneous progress — a hard
+   oversubscription regardless of software design. Rerunning the identical
+   `chan` topology at lower channel counts, same total 200,000 envelopes:
+
+   | Channels | Threads needed | `p50` (us)          |
+   |---------:|----------------:|---------------------:|
+   |        8 | 16 (> 12 cores) |     106,025-117,895 |
+   |        6 | 12 (= 12 cores) |      96,274-101,857 |
+   |        4 |  8 (< 12 cores) |       43,242-86,143 |
+   |        2 |  4 (< 12 cores) |       10,945-42,924 |
+   |    1 (`seq`) | 2           |               ~3,597 |
+
+   Throughput stayed roughly flat (~530k-700k eps) across every row —
+   **this is not a throughput/latency tradeoff, it's waste**: running more
+   channels than the host has real core budget for doesn't buy more
+   aggregate capacity, it just makes every envelope wait longer for no
+   benefit. Latency improves substantially as channel count drops toward
+   (and below) the core budget, *despite* each remaining channel handling
+   proportionally more envelopes (100,000 each at 2 channels vs. 25,000
+   each at 8) — ruling out "less work per channel" as an alternative
+   explanation for the improvement.
+
+**Operational takeaway, not a code change:** `seda-bus-rust`'s (and by the
+same architecture, `seda-bus-cpp`'s) channel/worker count is already fully
+caller-configurable — `Bus::new(workers)` and how many channels you
+register are both parameters the caller chooses today. The finding here is
+sizing guidance, not a missing feature: **do not create more concurrently-
+active producer/consumer channels than your deployment has real CPU cores
+for.** This benchmark's own `par = cores.min(8)` default happens to pick
+the *maximum* the benchmark will try, which is exactly the wrong end of
+this curve to default to blindly in production — a caller sizing a
+real `chan`-topology deployment should budget roughly 2 threads per
+channel (1 producer + 1 dedicated consumer) against `available_parallelism()`,
+not maximize channel count independent of it. Not implemented as an
+automatic default this pass (the benchmark's own `par` sizing was left
+as-is, so numbers throughout this report stay comparable to prior passes)
+— flagged as a concrete, measured case for a future sizing-helper API
+rather than asserted as already fixed.
 
 ## A note on host quietness
 

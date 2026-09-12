@@ -91,7 +91,13 @@ Rust's `seq` still carries a real, unresolved tail-latency stall
 (`p50` fine, `max` still reaches 63ms) — previously attributed to the
 `ra_common` rewire via an A/B test that itself predates this pass's
 construction-exclusion fix, so that causal claim is flagged as open, not
-re-confirmed. Full detail in `RESULTS.md`, including an "Every anomaly,
+re-confirmed. `chan`'s real backlog in Rust/C++ is now fully root-caused,
+not just explained: it's genuine thread-count oversubscription (8 channels
+need 16 threads; this benchmark host has 12 cores), confirmed by directly
+testing and ruling out two other hypotheses first, with a measured
+recovery curve as channel count drops toward the core budget — see
+`RESULTS.md`'s "Thread/channel count must stay within the host's core
+budget." Full detail in `RESULTS.md`, including an "Every anomaly,
 explained" section walking through each surprising number in both tables
 above individually, not just the headline findings.
 
