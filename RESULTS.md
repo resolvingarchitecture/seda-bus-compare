@@ -46,16 +46,16 @@ measures that specific stage's own sustained throughput under a real,
 bounded (1024), `Block`-backpressured queue — no assumed number, no
 number borrowed from a different config:
 
-| Implementation | `cap1` sustained eps | `cap8` sustained eps |
-|---|--:|--:|
-| Rust | 679,363 | 456,160 |
-| Java | 648,341 | 444,318 |
-| Go | 179,706 | 399,558 |
-| C# | 239,952 | 340,295 |
-| TypeScript | 203,898 | 219,670 |
-| C++ | 179,119 | 90,980 |
-| Python 3.14t (free-threaded) | 100,868 | 25,366 |
-| Python 3.13 (GIL) | 41,126 | 16,648 |
+| Implementation               | `cap1` sustained eps | `cap8` sustained eps |
+|------------------------------|---------------------:|---------------------:|
+| Rust                         |              679,363 |              456,160 |
+| Java                         |              648,341 |              444,318 |
+| Go                           |              179,706 |              399,558 |
+| C#                           |              239,952 |              340,295 |
+| TypeScript                   |              203,898 |              219,670 |
+| C++                          |              179,119 |               90,980 |
+| Python 3.14t (free-threaded) |              100,868 |               25,366 |
+| Python 3.13 (GIL)            |               41,126 |               16,648 |
 
 **C++ is the one implementation whose `cap8` sustained throughput is
 *lower* than its `cap1`** (90,980 vs 179,119 — every other language's
@@ -74,22 +74,22 @@ queue-depth/drain-tail columns) in
 [`results/capacity_summary.csv`](results/capacity_summary.csv); the
 shape that matters is achieved throughput as a fraction of target:
 
-| Implementation | Config | 0.5x | 1.0x | 1.5x |
-|---|---|--:|--:|--:|
-| TypeScript | `cap1` | 0.98 | 0.96 | 0.66 |
-| TypeScript | `cap8` | 0.95 | 0.92 | 0.66 |
-| Go | `cap1` | 0.95 | 0.94 | 0.65 |
-| Go | `cap8` | 0.95 | 0.89 | 0.60 |
-| Java | `cap1` | 0.93 | 0.86 | 0.65 |
-| Java | `cap8` | 0.94 | 0.80 | 0.46 |
-| Rust | `cap1` | 0.94 | 0.87 | 0.64 |
-| Rust | `cap8` | 0.89 | 0.82 | 0.64 |
-| C++ | `cap1` | 0.92 | 0.89 | 0.86 |
-| C++ | `cap8` | 0.86 | 0.83 | 0.69 |
-| C# | `cap1` | 0.80 | 0.69 | 0.59 |
-| C# | `cap8` | 0.71 | 0.60 | 0.52 |
-| Python 3.14t | `cap1` | 0.92 | 0.94 | 0.67 |
-| Python 3.14t | `cap8` | 0.95 | 0.95 | 0.79 |
+| Implementation    | Config | 0.5x | 1.0x | 1.5x |
+|-------------------|--------|-----:|-----:|-----:|
+| TypeScript        | `cap1` | 0.98 | 0.96 | 0.66 |
+| TypeScript        | `cap8` | 0.95 | 0.92 | 0.66 |
+| Go                | `cap1` | 0.95 | 0.94 | 0.65 |
+| Go                | `cap8` | 0.95 | 0.89 | 0.60 |
+| Java              | `cap1` | 0.93 | 0.86 | 0.65 |
+| Java              | `cap8` | 0.94 | 0.80 | 0.46 |
+| Rust              | `cap1` | 0.94 | 0.87 | 0.64 |
+| Rust              | `cap8` | 0.89 | 0.82 | 0.64 |
+| C++               | `cap1` | 0.92 | 0.89 | 0.86 |
+| C++               | `cap8` | 0.86 | 0.83 | 0.69 |
+| C#                | `cap1` | 0.80 | 0.69 | 0.59 |
+| C#                | `cap8` | 0.71 | 0.60 | 0.52 |
+| Python 3.14t      | `cap1` | 0.92 | 0.94 | 0.67 |
+| Python 3.14t      | `cap8` | 0.95 | 0.95 | 0.79 |
 | Python 3.13 (GIL) | `cap1` | 0.95 | 0.95 | 0.68 |
 | Python 3.13 (GIL) | `cap8` | 0.94 | 0.94 | 0.89 |
 
@@ -335,7 +335,7 @@ hand-waved.
 | Anomaly                                                                                                                                        | Explanation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 |------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | C++ `par` (247,211) is still *lower* than C++ `seq` (325,638), 0.76x — 8 producers still isn't a pure win, though it no longer collapses | **Was this report's worst throughput collapse (0.39x); now genuinely fixed, not just improved.** `Channel`'s single mutex (shared by every producer and consumer) was replaced with a two-lock ring-buffer queue this pass, more than tripling `par` (69K → 247K eps). The remaining 0.76x gap is a normal, much smaller residual — `par` still funnels 8 producers into one stage, it just no longer pays a Docker-specific mutex tax on top. See "Fixes applied this pass" below.                                                                                                                              |
-| *(Historical, this specific number's pass)* C# `par` (284,868) was flat against `seq` (272,474), ~1.05x — no gain *and* no collapse, unlike C++'s (former) hard collapse under the same design | At the time, C#'s shared-queue design was structurally identical to what C++ had *before* its fix (one lock guarding both `Offer` and `Poll`). A first two-lock fix attempt made things worse and was reverted; **a later pass fixed it with a different design** (two lock-free `ConcurrentQueue` lanes) — `par` now beats `seq`, 1.50x, this report's best ratio. See "Fixes applied this pass" below for both the reverted attempt and the working fix. |
+| C# `par` (284,868) is flat against `seq` (272,474), ~1.05x — no gain *and* no collapse, unlike C++'s (former) hard collapse under the same design | C#'s shared-queue design is structurally identical to what C++ had *before* this pass's fix (one lock guarding both `Offer` and `Poll`). A matching two-lock fix was attempted here this pass and made both `seq` and `par` latency *worse*, not just unimproved, without a clear mechanism identified in the time available — reverted, not shipped. See "Fixes applied this pass" below for the full attempt. |
 | Go `par` (423,400) barely beats Go `seq` (400,955), ~1.06x — looks like Go gets nothing from parallelism                                       | Misleading, not wrong: Go's `seq` is *itself* already backlogged (a real sustained-backlog case — see the classification table above), not a clean baseline. Comparing `par` against an already-degraded `seq` produces a ratio that says nothing about whether parallelism helped; compare Go's `chan` (1,505,869, 3.76x) against `seq` instead, or read `par`'s own absolute number on its own terms.                                                                                     |
 | Rust `chan` (660,248) is far behind Java's (2,063,028) and Go's (1,505,869), despite Rust being the systems-level, no-GC implementation        | Rust's `chan` shows a real, sustained backlog (`p50` 114,795.5us, 38% of trial duration — see the classification table) — root-caused, not just described: 8 channels need 16 concurrently-progressing threads on a 12-core host, and hard per-channel `concurrency(1)` isolation can't borrow spare capacity across channels the way `par`'s single shared queue can. See "Thread/channel count must stay within the host's core budget" below for the full investigation. |
 | TypeScript's `chan`-vs-`seq` ratio (6.06x) is the *best* in the whole report, despite Node being single-threaded with zero real OS parallelism | Real, and previously found, but the ratio is inflated by a badly-degraded `seq`/`par` baseline (both already deep in multi-second backlog — see the latency table), not by `chan` being exceptional in absolute terms: TS's `chan` throughput (131,097) is still the lowest of all eight implementations. Read the ratio and the absolute number as answering different questions — this report's own standing caution, restated here because this is the sharpest example of it.                             |
@@ -347,7 +347,7 @@ hand-waved.
 Rust `par`'s cliff (`p50` was tiny at 38.0us, `p99` jumped to 70,518.5us) is fixed, not just explained, in a later pass — see "Fixes applied this pass" below. `par`'s `p50` is now 95,678.8us: much higher, not lower, because the fix removed the *lock*, not the backlog | Was a genuinely different mechanism from `seq`'s stall (a small fraction of envelopes caught behind a producer or consumer thread preempted while holding the channel's data-queue lock). `parking_lot` (which fixed `seq`, touching only the pool's job queue) never touched this. Fixed separately by swapping the channel's `Mutex<VecDeque<Envelope>>` for a lock-free `ArrayQueue` — `par` throughput jumped 428K → 710K eps (+66%), and by Little's law a system doing that much more real work per second now sustains a real, symmetric backlog instead of a rare cliff. Higher `p50` here is the fix working, not a new problem — see the classification table above.                                                                                                                                                                                                                                                                   |
 | C++ `par`: this pass's fix changed the *shape* of the distribution, not just its scale — `p50` is now 12,971.9us (was 13.6us) while `p99` is now 85,030.7us (was 153,688.0us — a ~11,000x cliff from `p50`; now only ~6.5x) | Expected, and matches the throughput anomaly above: with the mutex bottleneck gone, `par` sustains real throughput (247K eps, was 69K), and by Little's law a system doing more real work per second naturally carries a bigger *average* queue depth — a real, if smaller, backlog now touches most envelopes (higher `p50`) instead of a rare few paying a catastrophic tail. A flatter, more predictable distribution, not a hidden regression — see the classification table's `par` row for C++, now "mild backlog" instead of "clean, mild tail."                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Java `par` never showed a cliff — `p50` 1,659.5us, `p99` 7,307.2us, `max` 21,449.0us, all within one order of magnitude — despite using a design similar to what Rust and C++ had before their fixes         | The leading explanation, consistent with this session's own directly-tested finding on `seda-bus-rust`'s pool: JVM's `ExecutorService`/`LockSupport` spin briefly before making an OS-level park/wake call, while Rust's raw `std::sync::mpsc` and C++'s original single `std::mutex` parked immediately with no spin phase. This describes why the runtimes differed, not a recommendation that every port should adopt Java's specific approach — each port implements SEDA by its own best-fitting means. Rust's fix (`parking_lot`, adds the same spin-before-park) and C++'s fix (a two-lock queue, sidesteps the single-lock cliff by a different mechanism entirely) both closed most of the gap to Java's behavior here, by different means — see "Fixes applied this pass" below for both. |
-| *(Historical, this specific number's pass)* C# `par`'s tail shape moved between passes — `p50` 30.3us, `p99` 17,186.1us, `p999` 71,260.1us — a bigger cliff than an earlier pass measured (`p50` 15.8us, `p99` 1,805.3us)                             | At the time, C#'s code was unchanged between those two passes (the attempted fix was reverted before either run) — the movement was run-to-run variance, not a regression. **C#'s `Channel` is no longer the original design** — see the "Update, a later pass" note under "Fixes applied this pass" for the fix that replaced it, and this pass's own latency table above for its current numbers. |
+| C# `par`'s tail shape moved between passes — `p50` 30.3us, `p99` 17,186.1us, `p999` 71,260.1us — a bigger cliff than the previous pass measured (`p50` 15.8us, `p99` 1,805.3us)                             | C#'s code is byte-for-byte unchanged between passes (the attempted fix was reverted before this run) — this is run-to-run variance, not a regression, consistent with the noise levels documented throughout this report at three trials on a single host. The previous pass's "thinner tail, consistent with .NET's `Monitor.Enter` spinning" explanation is still the leading hypothesis, weakened by not reproducing tightly across passes — not independently confirmed either time.                                                                                                                                                                                                                                                                                                                                          |
 | `seq` shows a real, sustained backlog in Go, C#, Python (both variants), and TypeScript, and a milder one in Java — five of eight implementations, on the *simplest* configuration (1 producer, 1 channel) | One unifying mechanism, not five coincidences: `seq` runs with exactly one consumer/worker thread in every port's design (mirrored from the original Java `SEDABus`). Once a producer isn't throttled by envelope construction, any implementation whose single-worker dispatch loop has real per-item cost (a channel poll, an atomic increment, invoking the consumer callback) gets outrun by a producer that can now publish as fast as a bare field-write allows, and the backlog persists for the whole trial. C++ (now, after this pass's fix) and Rust (tail-only, not full backlog) are the two implementations whose single-consumer dispatch path is fast enough to mostly keep up — see the classification table above. |
 | `chan` also shows real backlog in Rust, C++, and partially Java — the configuration this report has repeatedly called "no artificial contention point left to hide behind," and throughput-wise `chan` is *faster* than `seq` for these same three, which looks contradictory next to a worse `p50` | Not contradictory (Little's law: more total work finished per second while individual items each wait longer just means a bigger backlog is being sustained throughout), and **root-caused, not just explained** — see "Thread/channel count must stay within the host's core budget" below for the full investigation and the measured fix. Short version: `chan`'s 8 channels need 16 concurrently-progressing threads (8 producers + 8 dedicated consumers) on a host with only 12 real cores; cutting channel count to fit that budget recovers most of the latency, at no throughput cost. Two other hypotheses were tested and ruled out first (resubmission frequency through the shared job queue; hard per-channel `concurrency(1)` isolation preventing cross-channel work-stealing) before landing on the confirmed cause. |
 | C++ `seq`: this pass's tail is much tighter than before — `p999` 9,564.6us, `max` 23,344.3us, only a ~2.4x jump (was `p999` 518.4us → `max` 11,358.6us, a ~22x jump)                                       | Consistent with the two-lock fix generally: removing per-item heap allocation (a first, reverted attempt at this fix used a linked list and introduced exactly this kind of isolated cold-stall artifact) and the single mutex both remove opportunities for a rare outlier. `seq` is still this report's cleanest case; its already-small tail got smaller, not larger.                                                                                                                                                                                                                                    |
@@ -622,23 +622,8 @@ available. **Reverted rather than shipped as a partial or uncertain
 win** — this report's standing practice (see `seda-bus-rust`'s
 `crossbeam-channel` revert above) is to ship a fix only when its net effect
 is verified and understood, not merely "probably better on one measure."
-
-**Update, a later pass: fixed, with a different design.** Replaced
-`Channel`'s `LinkedList` + single lock with two lock-free
-`ConcurrentQueue` lanes (fresh admissions and retries drained separately,
-retries always ahead) instead of a hand-rolled second lock. The working
-theory for why the two-lock attempt above made things worse: `Bus`
-drains every stage via the shared, process-wide .NET `ThreadPool`, which
-throttles new-thread injection hard under sustained demand; any blocking
-wait introduced inside a `Drain` work item is exactly what that pool
-punishes. The `ConcurrentQueue` design's only wait (`Block` backpressure)
-runs on the producer's own calling thread inside `Publish`, never inside
-a `ThreadPool`-scheduled `Drain` — preserving the property that made the
-*original* single-lock design accidentally `ThreadPool`-safe. Docker-
-verified: `par` throughput 272,370 → 421,688 eps (+55%), now beating
-`seq` (1.50x, the best ratio in this report's firehose table). C#'s
-numbers in this pass's tables reflect this fixed design, not the
-original one described above.
+C#'s numbers in every table in this report are its original, unmodified
+design.
 
 ## Rust: the `ra-common` rewire, revisited
 
@@ -709,20 +694,16 @@ different mechanism — `crossbeam-queue`'s lock-free bounded `ArrayQueue`
 in place of `Mutex<VecDeque<Envelope>>` — chosen over hand-rolling a
 two-lock queue because a well-tested lock-free MPMC ring buffer was
 already available in the ecosystem and needed no `unsafe` code to get
-right. The same two-lock approach (a hand-rolled linked-list-based second lock)
-attempted against C# made `seq`/`par` latency worse, not better, and was
-reverted; a later pass fixed the same bottleneck there with a third
-mechanism — two lock-free `ConcurrentQueue` lanes (`par` 272,370 →
-421,688 eps, +55%, now beating `seq`) — so removing the shared mutex is
-now a real, verified fix in all three languages that had it as a single
-lock, by three different mechanisms depending on what each runtime
-offers: it depends on getting the allocation strategy right for the
-target runtime (a lesson C++ needed), on a suitable lock-free structure
-existing for the runtime (Rust and C# each had one to reach for; not
-every language does), on avoiding a wait inside a shared thread pool's
-own work item (the likely reason C#'s *first* attempt regressed), and on
-the runtime's own lock/wait primitives not already absorbing most of the
-cost the way Java's apparently do without any queue redesign at all. See
+right. The same two-lock approach attempted against C# made `seq`/`par`
+latency worse, not better, and was reverted — so removing the shared
+mutex is a real, verified fix for *this specific bottleneck* in two of
+the three languages that still had it as a single lock, not a universal
+one: it depends on getting the allocation strategy right for the target
+runtime (a lesson C++ needed and C# didn't get a working answer to in the
+time available), on a suitable lock-free structure existing for the
+runtime (Rust had one to reach for; not every language does), and on the
+runtime's own lock/wait primitives not already absorbing most of the cost
+the way Java's apparently do without any queue redesign at all. See
 `METHODOLOGY.md` for the original pros/cons write-up this section is
 built on.
 
@@ -761,16 +742,15 @@ thread, exactly as previously found; that part of the finding holds.
 
 ## Other attributes
 
-Pulled from [`seda-bus-design`](https://github.com/resolvingarchitecture/seda-bus-design)'s
-own comparison table (§2.1) — the maintained source, not re-derived here
-— plus three new columns. Unaffected by this pass's benchmark methodology
-change.
+Pulled from [`seda-bus/DESIGN.md`](../DESIGN.md)'s own comparison table
+(§2.1) — the maintained source, not re-derived here — plus three new
+columns. Unaffected by this pass's benchmark methodology change.
 
 |                                   |                Java |         Rust |                Python |          TypeScript |                                         C++ |                  C# |                                       Go |
 |-----------------------------------|--------------------:|-------------:|----------------------:|--------------------:|--------------------------------------------:|--------------------:|-----------------------------------------:|
 | Version                           |               1.3.1 |        0.4.0 |                 0.2.0 |               0.2.0 |                                       0.1.0 |               0.1.0 |                                    0.1.0 |
-| Source LOC                        |                1,034 |          902 |                   595 |                 835 |                                         941 |                 779 |                                      778 |
-| Integration tests                 |                  18 |           19 |                     20 |                  19 |                                          19 |                  19 |                                       19 |
+| Source LOC                        |                 962 |          853 |                   595 |                 835 |                                         898 |                 620 |                                      768 |
+| Integration tests                 |                   8 |            9 |                    11 |                  16 |                                          13 |                  13 |                                       13 |
 | Runtime deps beyond `ra-common-*` |                   0 | `log`, `parking_lot`, `crossbeam-queue` |                     0 |                   0 |                                           0 |                   0 |                                        0 |
 | Envelope source                   |         `ra-common` |  `ra-common` |           `ra-common` |         `ra-common` |                             `ra-common-cpp` |      `ra-common-cs` |                           `ra-common-go` |
 | Worker pool                       |   `ExecutorService` |  hand-rolled |  `ThreadPoolExecutor` |          event loop |                                 hand-rolled | shared `ThreadPool` |                        none (goroutines) |
@@ -798,10 +778,9 @@ because the measurement was trusted enough to be worth explaining
 precisely, then pushed on hard enough ("there is no way 8 threads draining
 200k messages is slower than 1 thread... if that's the case, the
 implementation is bust") that "explained" stopped being an acceptable
-stopping point. One attempted fix (C#, a hand-rolled two-lock queue) was pushed on with
-the same rigor, found wanting, and reverted rather than kept for the sake
-of having done something — a later pass fixed the same bottleneck with a
-different design instead (see "Mutex vs. lock-free" above).
+stopping point. One attempted fix (C#) was pushed on with the same
+rigor, found wanting, and reverted rather than kept for the sake of having
+done something.
 
 Within the `ra-common`-carrying implementations, don't read close
 percentage differences between adjacent rows as meaningful given three
