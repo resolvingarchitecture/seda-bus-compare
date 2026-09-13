@@ -7,6 +7,7 @@ installed package) so this needs no venv/build step — just python3.13+.
 
 import gc
 import json
+import math
 import os
 import sys
 import threading
@@ -16,11 +17,32 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "seda-bus-python", "src"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "..", "common", "ra-common-python", "src"))
 
-from seda_bus import SEDABus, make_envelope  # noqa: E402
+from seda_bus import Backpressure, SEDABus, make_envelope  # noqa: E402
 from seda_bus.envelope import envelope_payload, set_payload  # noqa: E402
 
 TOTAL = 200_000
 TRIALS = 3
+
+# -- capacity curve (primary benchmark; see ../WORKLOAD.md) --------------
+CAP_CAPACITY = 1024
+CALIBRATION_DURATION_S = 2.0
+CALIBRATION_TRIALS = 2
+# Generous vs. this port's own known throughput ceiling (RESULTS.md: well
+# under 200k eps total even at its fastest, free-threaded, config) - a
+# calibration burst has no prior rate estimate to size a pool against, so
+# this is a fixed constant rather than the sweep's rate-derived formula.
+CALIBRATION_POOL_PER_PRODUCER = 200_000
+SWEEP_DURATION_S = 4.0
+SWEEP_TRIALS = 2
+LOAD_FRACTIONS = (0.5, 1.0, 1.5)
+TICK_S = 0.02
+# Hard ceiling on one sweep trial's TOTAL pre-built pool, across all its
+# producers combined - the rate-derived formula below grows unboundedly
+# with target_rate_eps, which for a fast config at high load and several
+# producers can ask for millions of Envelopes per producer (an uncapped
+# version of this same formula OOM-killed seda-bus-go's equivalent
+# benchmark outright; capped here before ever running it).
+MAX_SWEEP_POOL_TOTAL = 400_000
 
 # Pre-building TOTAL envelopes is itself a burst of allocation right before
 # the timed window starts; without a settle pause + explicit GC, a
@@ -60,6 +82,149 @@ def _compute_latency_stats(samples: list[float]) -> dict:
         "p999_us": samples[int(0.999 * (n - 1))],
         "max_us": samples[n - 1],
     }
+
+
+def _make_capacity_bus(producers: int):
+    """Fresh bus + one 'bench' channel: real Capacity=1024, Backpressure=Block
+    - the opposite of run_shared's "capacity large enough to never engage"
+    choice. See ../WORKLOAD.md's "The capacity curve" section."""
+    bus = SEDABus(workers=producers)
+    bus.start()
+    lock = threading.Lock()
+    latencies: list[float] = []
+    delivered = {"n": 0}
+
+    def consumer(env):
+        t1 = _now_ns()
+        t0 = envelope_payload(env)
+        with lock:
+            latencies.append((t1 - t0) / 1000.0)
+            delivered["n"] += 1
+        return True
+
+    bus.channel(
+        "bench",
+        capacity=CAP_CAPACITY,
+        concurrency=producers,
+        backpressure=Backpressure.BLOCK,
+    )
+    bus.subscribe("bench", consumer)
+    return bus, latencies, delivered
+
+
+def _run_timed_window(producers: int, duration_s: float, pool_per_producer: list[int], per_tick) -> dict:
+    """Shared machinery for both Step 1 (calibration, per_tick=None -> publish
+    flat-out) and Step 2 (sweep, per_tick(producer_idx) -> ticked pacing)."""
+    bus, latencies, delivered = _make_capacity_bus(producers)
+    pools = [[make_envelope("bench", 0) for _ in range(pool_per_producer[p])] for p in range(producers)]
+    published = [0] * producers
+
+    def produce_flatout(idx, envs, deadline):
+        n = len(envs)
+        i = 0
+        while i < n and time.perf_counter() < deadline:
+            set_payload(envs[i], _now_ns())
+            bus.publish(envs[i], timeout=30.0)
+            i += 1
+        published[idx] = i
+
+    def produce_ticked(idx, envs, deadline, tick_size):
+        n = len(envs)
+        i = 0
+        while i < n and time.perf_counter() < deadline:
+            tick_start = time.perf_counter()
+            batch_end = min(i + tick_size, n)
+            while i < batch_end and time.perf_counter() < deadline:
+                set_payload(envs[i], _now_ns())
+                bus.publish(envs[i], timeout=30.0)
+                i += 1
+            tick_elapsed = time.perf_counter() - tick_start
+            if tick_elapsed < TICK_S:
+                time.sleep(TICK_S - tick_elapsed)
+        published[idx] = i
+
+    _settle()
+    start = time.perf_counter()
+    deadline = start + duration_s
+    threads = []
+    for p in range(producers):
+        if per_tick is None:
+            t = threading.Thread(target=produce_flatout, args=(p, pools[p], deadline))
+        else:
+            t = threading.Thread(target=produce_ticked, args=(p, pools[p], deadline, per_tick[p]))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    window_elapsed = time.perf_counter() - start
+    end_of_window_depth = bus.stats()["bench"]["depth"]
+
+    drain_start = time.perf_counter()
+    drained = bus.shutdown(timeout=60.0)
+    drain_tail_ms = round((time.perf_counter() - drain_start) * 1000)
+
+    total_published = sum(published)
+    return {
+        "total": total_published,
+        "delivered": delivered["n"],
+        "elapsed_s": window_elapsed,
+        "throughput_eps": total_published / window_elapsed,
+        "end_of_window_depth": end_of_window_depth,
+        "drain_tail_ms": drain_tail_ms,
+        "drained": drained,
+        "latencies": latencies or [0.0],
+    }
+
+
+def _capacity_row(config: str, producers: int, trial: int, load_fraction: float, target_rate_eps: float, r: dict) -> dict:
+    return {
+        "language": "python",
+        "config": config,
+        "trial": trial,
+        "producers": producers,
+        "concurrency": producers,
+        "channels": 1,
+        "capacity": CAP_CAPACITY,
+        "load_fraction": load_fraction,
+        "target_rate_eps": round(target_rate_eps),
+        "total": r["total"],
+        "delivered": r["delivered"],
+        "elapsed_ms": round(r["elapsed_s"] * 1000),
+        "throughput_eps": r["throughput_eps"],
+        "end_of_window_depth": r["end_of_window_depth"],
+        "drain_tail_ms": r["drain_tail_ms"],
+        **_compute_latency_stats(r["latencies"]),
+        "drained": r["drained"],
+        **_version_fields(),
+    }
+
+
+def run_capacity_curve(config: str, producers: int) -> list[dict]:
+    """Step 1 (calibrate this stage's own sustained capacity) then Step 2
+    (sweep load_fraction in [0.5, 1.0, 1.5]) - see ../WORKLOAD.md."""
+    rows = []
+
+    calib_results = []
+    calib_pool = [CALIBRATION_POOL_PER_PRODUCER] * producers
+    for trial in range(1, CALIBRATION_TRIALS + 1):
+        r = _run_timed_window(producers, CALIBRATION_DURATION_S, calib_pool, per_tick=None)
+        calib_results.append(r)
+        rows.append(_capacity_row(config, producers, trial, 0.0, 0.0, r))
+
+    max_throughput_eps = max(r["throughput_eps"] for r in calib_results)
+
+    for load_fraction in LOAD_FRACTIONS:
+        target_rate_eps = max_throughput_eps * load_fraction
+        rate_per_producer = target_rate_eps / producers
+        pool_size = max(1, math.ceil(rate_per_producer * SWEEP_DURATION_S * 1.5))
+        pool_size = min(pool_size, MAX_SWEEP_POOL_TOTAL // producers)
+        pool = [pool_size] * producers
+        per_tick = [max(1, round(rate_per_producer * TICK_S))] * producers
+        for trial in range(1, SWEEP_TRIALS + 1):
+            r = _run_timed_window(producers, SWEEP_DURATION_S, pool, per_tick=per_tick)
+            rows.append(_capacity_row(config, producers, trial, load_fraction, target_rate_eps, r))
+
+    return rows
 
 
 def run_shared(config: str, producers: int) -> dict:
@@ -225,6 +390,11 @@ def main():
     for trial in range(1, TRIALS + 1):
         r = run_independent_channels(par)
         r["trial"] = trial
+        print(json.dumps(r))
+
+    for r in run_capacity_curve("cap1", 1):
+        print(json.dumps(r))
+    for r in run_capacity_curve("cap8", par):
         print(json.dumps(r))
 
 

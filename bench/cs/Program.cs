@@ -186,6 +186,185 @@ Result RunIndependentChannels(int producers)
         stats.P50Us, stats.P99Us, stats.P999Us, stats.MaxUs, drained);
 }
 
+// -- capacity curve (primary benchmark) - see ../WORKLOAD.md ------------
+
+const double SweepDurationSeconds = 4.0;
+const double TickSeconds = 0.02;
+// Hard ceiling on one sweep trial's TOTAL pre-built pool, across all its
+// producers combined - the rate-derived formula below grows unboundedly
+// with target_rate_eps, which for a fast config at high load and several
+// producers can ask for millions of envelopes per producer (an uncapped
+// version of this same formula OOM-killed seda-bus-go's equivalent
+// benchmark outright; capped here before ever running it).
+const int MaxSweepPoolTotal = 400_000;
+const double CalibrationDurationSeconds = 2.0;
+const int CalibrationTotalBudget = 1_500_000; // split across producers; see WORKLOAD.md Step 1
+
+// Publishes as fast as possible (no pacing) for CalibrationDurationSeconds -
+// WORKLOAD.md Step 1. load_fraction=0/target_rate_eps=0 mark this as a
+// calibration row, not a sweep row.
+CapResult RunCapacityCalibration(string config, int producers, int concurrency, int trial)
+{
+    var bus = new Bus(concurrency);
+    long count = 0;
+    int poolPerProducer = CalibrationTotalBudget / producers;
+    var latencies = new double[poolPerProducer * producers + 4096];
+    bus.Channel("bench", new ChannelConfig().WithCapacity(1024).WithConcurrency(concurrency).WithBackpressure(Backpressure.Block));
+    bus.Subscribe("bench", env =>
+    {
+        long t1 = Stopwatch.GetTimestamp();
+        long t0 = EnvelopePayload(env)!.GetValue<long>();
+        long idx = Interlocked.Increment(ref count) - 1;
+        if (idx < latencies.Length) latencies[idx] = TicksToUs(t1 - t0);
+        return true;
+    });
+
+    var timeout = TimeSpan.FromSeconds(30);
+    var pools = new List<Envelope>[producers];
+    for (int p = 0; p < producers; p++)
+    {
+        var envs = new List<Envelope>(poolPerProducer);
+        for (int i = 0; i < poolPerProducer; i++) envs.Add(MakeEnvelope("bench", 0L));
+        pools[p] = envs;
+    }
+
+    Settle();
+    var sw = Stopwatch.StartNew();
+    var deadline = TimeSpan.FromSeconds(CalibrationDurationSeconds);
+    long published = 0;
+    var threads = new List<Thread>();
+    for (int p = 0; p < producers; p++)
+    {
+        var envs = pools[p];
+        threads.Add(new Thread(() =>
+        {
+            int i = 0;
+            while (sw.Elapsed < deadline && i < envs.Count)
+            {
+                var env = envs[i++];
+                SetPayload(env, Stopwatch.GetTimestamp());
+                if (bus.Publish(env, timeout)) Interlocked.Increment(ref published);
+            }
+        }));
+    }
+    foreach (var t in threads) t.Start();
+    foreach (var t in threads) t.Join();
+    var windowElapsed = sw.Elapsed;
+    int endOfWindowDepth = bus.GetStats().TryGetValue("bench", out var s0) ? s0.Depth : 0;
+    var drainSw = Stopwatch.StartNew();
+    bool drained = bus.Shutdown(TimeSpan.FromSeconds(60));
+    long drainTailMs = drainSw.ElapsedMilliseconds;
+
+    long delivered = Interlocked.Read(ref count);
+    var stats = ComputeLatencyStats(latencies[..(int)Math.Min(delivered, latencies.Length)]);
+
+    return new CapResult("cs", config, trial, producers, concurrency, 1, 1024, 0.0, 0.0,
+        (int)published, delivered, (long)windowElapsed.TotalMilliseconds,
+        published / windowElapsed.TotalSeconds, endOfWindowDepth, drainTailMs,
+        stats.P50Us, stats.P99Us, stats.P999Us, stats.MaxUs, drained);
+}
+
+// Sweeps one load_fraction against maxThroughputEps (from calibration) -
+// WORKLOAD.md Step 2. Each producer paces itself with a tick-based rate
+// limiter rather than a naive per-publish sleep.
+CapResult RunCapacitySweep(string config, int producers, int concurrency, double loadFraction, double maxThroughputEps, int trial)
+{
+    double targetRateEps = maxThroughputEps * loadFraction;
+    double perProducerRate = targetRateEps / producers;
+    int perTick = Math.Max(1, (int)Math.Round(perProducerRate * TickSeconds));
+    int poolPerProducer = Math.Max(1, (int)Math.Ceiling(perProducerRate * SweepDurationSeconds * 1.5));
+    poolPerProducer = Math.Min(poolPerProducer, MaxSweepPoolTotal / producers);
+
+    var bus = new Bus(concurrency);
+    long count = 0;
+    var latencies = new double[poolPerProducer * producers + 4096];
+    bus.Channel("bench", new ChannelConfig().WithCapacity(1024).WithConcurrency(concurrency).WithBackpressure(Backpressure.Block));
+    bus.Subscribe("bench", env =>
+    {
+        long t1 = Stopwatch.GetTimestamp();
+        long t0 = EnvelopePayload(env)!.GetValue<long>();
+        long idx = Interlocked.Increment(ref count) - 1;
+        if (idx < latencies.Length) latencies[idx] = TicksToUs(t1 - t0);
+        return true;
+    });
+
+    var timeout = TimeSpan.FromSeconds(30);
+    var pools = new List<Envelope>[producers];
+    for (int p = 0; p < producers; p++)
+    {
+        var envs = new List<Envelope>(poolPerProducer);
+        for (int i = 0; i < poolPerProducer; i++) envs.Add(MakeEnvelope("bench", 0L));
+        pools[p] = envs;
+    }
+
+    Settle();
+    var sw = Stopwatch.StartNew();
+    var windowDeadline = TimeSpan.FromSeconds(SweepDurationSeconds);
+    var tick = TimeSpan.FromSeconds(TickSeconds);
+    long published = 0;
+    var threads = new List<Thread>();
+    for (int p = 0; p < producers; p++)
+    {
+        var envs = pools[p];
+        threads.Add(new Thread(() =>
+        {
+            int i = 0;
+            while (sw.Elapsed < windowDeadline && i < envs.Count)
+            {
+                var tickStart = sw.Elapsed;
+                int n = 0;
+                while (n < perTick && i < envs.Count && sw.Elapsed < windowDeadline)
+                {
+                    var env = envs[i++];
+                    SetPayload(env, Stopwatch.GetTimestamp());
+                    if (bus.Publish(env, timeout)) Interlocked.Increment(ref published);
+                    n++;
+                }
+                var tickElapsed = sw.Elapsed - tickStart;
+                var remaining = tick - tickElapsed;
+                // else: don't sleep - Block's wait is already the bottleneck,
+                // exactly the signal this benchmark exists to show. See
+                // ../WORKLOAD.md's tick pseudocode.
+                if (remaining > TimeSpan.Zero) Thread.Sleep(remaining);
+            }
+        }));
+    }
+    foreach (var t in threads) t.Start();
+    foreach (var t in threads) t.Join();
+    var windowElapsed = sw.Elapsed;
+    int endOfWindowDepth = bus.GetStats().TryGetValue("bench", out var s1) ? s1.Depth : 0;
+    var drainSw = Stopwatch.StartNew();
+    bool drained = bus.Shutdown(TimeSpan.FromSeconds(60));
+    long drainTailMs = drainSw.ElapsedMilliseconds;
+
+    long delivered = Interlocked.Read(ref count);
+    var stats = ComputeLatencyStats(latencies[..(int)Math.Min(delivered, latencies.Length)]);
+
+    return new CapResult("cs", config, trial, producers, concurrency, 1, 1024, loadFraction, targetRateEps,
+        (int)published, delivered, (long)windowElapsed.TotalMilliseconds,
+        published / windowElapsed.TotalSeconds, endOfWindowDepth, drainTailMs,
+        stats.P50Us, stats.P99Us, stats.P999Us, stats.MaxUs, drained);
+}
+
+void RunCapacityCurve(string config, int producers, int concurrency)
+{
+    double maxThroughputEps = 0;
+    for (int trial = 1; trial <= 2; trial++)
+    {
+        var r = RunCapacityCalibration(config, producers, concurrency, trial);
+        Console.WriteLine(JsonSerializer.Serialize(r, jsonOptions));
+        maxThroughputEps = Math.Max(maxThroughputEps, r.ThroughputEps);
+    }
+    foreach (var loadFraction in new[] { 0.5, 1.0, 1.5 })
+    {
+        for (int trial = 1; trial <= 2; trial++)
+        {
+            var r = RunCapacitySweep(config, producers, concurrency, loadFraction, maxThroughputEps, trial);
+            Console.WriteLine(JsonSerializer.Serialize(r, jsonOptions));
+        }
+    }
+}
+
 int par = Math.Min(8, Environment.ProcessorCount);
 if (par < 1) par = 1;
 
@@ -205,6 +384,9 @@ for (int trial = 1; trial <= Trials; trial++)
     Console.WriteLine(JsonSerializer.Serialize(r, jsonOptions));
 }
 
+RunCapacityCurve("cap1", 1, 1);
+RunCapacityCurve("cap8", par, par);
+
 record LatencyStats(double P50Us, double P99Us, double P999Us, double MaxUs);
 
 record Result(
@@ -218,6 +400,28 @@ record Result(
     long Delivered,
     long ElapsedMs,
     double ThroughputEps,
+    [property: JsonPropertyName("p50_us")] double P50Us,
+    [property: JsonPropertyName("p99_us")] double P99Us,
+    [property: JsonPropertyName("p999_us")] double P999Us,
+    [property: JsonPropertyName("max_us")] double MaxUs,
+    bool Drained);
+
+record CapResult(
+    string Language,
+    string Config,
+    int Trial,
+    int Producers,
+    int Concurrency,
+    int Channels,
+    int Capacity,
+    [property: JsonPropertyName("load_fraction")] double LoadFraction,
+    [property: JsonPropertyName("target_rate_eps")] double TargetRateEps,
+    int Total,
+    long Delivered,
+    long ElapsedMs,
+    double ThroughputEps,
+    [property: JsonPropertyName("end_of_window_depth")] int EndOfWindowDepth,
+    [property: JsonPropertyName("drain_tail_ms")] long DrainTailMs,
     [property: JsonPropertyName("p50_us")] double P50Us,
     [property: JsonPropertyName("p99_us")] double P99Us,
     [property: JsonPropertyName("p999_us")] double P999Us,

@@ -4,8 +4,10 @@ package resolvingarchitecture.sedabuscompare;
 // implements — every bench/<lang> program follows the same shape.
 
 import ra.common.Envelope;
+import ra.common.messaging.MessageChannel;
 import ra.common.route.SimpleRoute;
 import ra.common.service.ServiceLevel;
+import ra.sedabus.Backpressure;
 import ra.sedabus.SEDABus;
 
 import java.util.Arrays;
@@ -208,6 +210,148 @@ public class Bench {
                 TOTAL / elapsedS, computeLatencyStats(allLatencies), drained);
     }
 
+    // -- capacity curve (primary benchmark; see ../../WORKLOAD.md) ------
+
+    static final int CAP_CAPACITY = 1024;
+    static final int CALIBRATION_TRIALS = 2;
+    static final long CALIBRATION_DURATION_MS = 2000;
+    static final int SWEEP_TRIALS = 2;
+    static final long SWEEP_DURATION_MS = 4000;
+    static final long TICK_MS = 20;
+    // Hard ceiling on one sweep trial's TOTAL pre-built pool, across all
+    // its producers combined - the rate-derived formula below grows
+    // unboundedly with target_rate_eps, which for a fast config at high
+    // load and several producers can ask for millions of Envelopes per
+    // producer (an uncapped version of this same formula OOM-killed
+    // seda-bus-go's equivalent benchmark outright; capped here before ever
+    // running it).
+    static final int MAX_SWEEP_POOL_TOTAL = 400_000;
+    static final double[] LOAD_FRACTIONS = {0.5, 1.0, 1.5};
+
+    record CapResult(String config, int producers, int concurrency, int channels, int capacity,
+                      double loadFraction, double targetRateEps, int total, long delivered, long elapsedMs,
+                      double throughputEps, int endOfWindowDepth, long drainTailMs, LatencyStats latency,
+                      boolean drained) {
+    }
+
+    static void printCap(CapResult r, int trial) {
+        System.out.printf(
+                "{\"language\":\"java\",\"config\":\"%s\",\"trial\":%d,\"producers\":%d,\"concurrency\":%d,"
+                        + "\"channels\":%d,\"capacity\":%d,\"load_fraction\":%.2f,\"target_rate_eps\":%.2f,"
+                        + "\"total\":%d,\"delivered\":%d,\"elapsed_ms\":%d,\"throughput_eps\":%f,"
+                        + "\"end_of_window_depth\":%d,\"drain_tail_ms\":%d,"
+                        + "\"p50_us\":%f,\"p99_us\":%f,\"p999_us\":%f,\"max_us\":%f,\"drained\":%s}%n",
+                r.config(), trial, r.producers(), r.concurrency(), r.channels(), r.capacity(), r.loadFraction(),
+                r.targetRateEps(), r.total(), r.delivered(), r.elapsedMs(), r.throughputEps(),
+                r.endOfWindowDepth(), r.drainTailMs(),
+                r.latency().p50Us(), r.latency().p99Us(), r.latency().p999Us(), r.latency().maxUs(), r.drained());
+    }
+
+    // One channel, Capacity 1024, Backpressure.Block, `producers` producer
+    // threads sharing it with Concurrency == producers (mirrors seq/par's
+    // producer/concurrency shape). targetRateEpsTotal == 0 means unpaced
+    // (Step 1's calibration burst); otherwise each producer paces itself in
+    // TICK_MS ticks, per ../../WORKLOAD.md Step 2.4.
+    static CapResult runCapacityWindow(String config, int producers, int concurrency, long durationMs,
+                                        double targetRateEpsTotal, double loadFraction, int poolPerProducer)
+            throws InterruptedException {
+        SEDABus bus = new SEDABus();
+        Properties props = new Properties();
+        props.setProperty("ra.sedabus.pool.max", Integer.toString(concurrency));
+        bus.start(props);
+
+        AtomicLong count = new AtomicLong();
+        double[] latencies = new double[poolPerProducer * producers];
+        MessageChannel channel = bus.registerChannel(
+                "bench", CAP_CAPACITY, ServiceLevel.AtMostOnce, null, false, concurrency, Backpressure.Block);
+        bus.registerAsynchConsumer("bench", envelope -> {
+            long t1 = System.nanoTime();
+            long t0 = (Long) envelope.getContent();
+            int idx = (int) count.getAndIncrement();
+            if (idx < latencies.length) {
+                latencies[idx] = (t1 - t0) / 1000.0;
+            }
+            return true;
+        });
+
+        // Pre-build this trial's envelope pool before the timed window
+        // starts - construction must never fall inside it. Sized per
+        // ../../WORKLOAD.md Step 2.2 for the sweep; calibration passes its
+        // own generous fixed size (see runCalibration).
+        Envelope[][] pool = new Envelope[producers][];
+        for (int p = 0; p < producers; p++) {
+            Envelope[] envs = new Envelope[poolPerProducer];
+            for (int i = 0; i < poolPerProducer; i++) {
+                Envelope e = Envelope.documentFactory();
+                e.getDynamicRoutingSlip().addRoute(new SimpleRoute("bench", "RECEIVE"));
+                envs[i] = e;
+            }
+            pool[p] = envs;
+        }
+
+        double targetRatePerProducer = targetRateEpsTotal / producers;
+        // Unpaced (calibration): publish everything back-to-back, no sleep.
+        long perTick = targetRatePerProducer > 0
+                ? Math.max(1, Math.round(targetRatePerProducer * (TICK_MS / 1000.0)))
+                : Long.MAX_VALUE;
+
+        AtomicLong published = new AtomicLong();
+        settle();
+        long start = System.nanoTime();
+        long windowDeadlineNanos = start + durationMs * 1_000_000L;
+        Thread[] threads = new Thread[producers];
+        for (int p = 0; p < producers; p++) {
+            Envelope[] envs = pool[p];
+            threads[p] = new Thread(() -> {
+                int i = 0;
+                while (i < envs.length && System.nanoTime() < windowDeadlineNanos) {
+                    long tickStart = System.nanoTime();
+                    long n = 0;
+                    while (n < perTick && i < envs.length && System.nanoTime() < windowDeadlineNanos) {
+                        Envelope e = envs[i++];
+                        e.addContent(System.nanoTime());
+                        bus.publish(e); // Block: waits for room rather than failing; see ../../WORKLOAD.md
+                        published.incrementAndGet();
+                        n++;
+                    }
+                    long tickElapsedMs = (System.nanoTime() - tickStart) / 1_000_000L;
+                    if (tickElapsedMs < TICK_MS) {
+                        try {
+                            Thread.sleep(TICK_MS - tickElapsedMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    // else: don't sleep - Block is already the bottleneck,
+                    // and the achieved rate falling below target is exactly
+                    // the signal this benchmark exists to show.
+                }
+            });
+            threads[p].start();
+        }
+        for (Thread t : threads) t.join();
+        long windowElapsedNs = System.nanoTime() - start;
+
+        int endOfWindowDepth = channel.queued();
+
+        long drainStart = System.nanoTime();
+        // seda-bus-java's public API has no custom-timeout shutdown call;
+        // gracefulShutdown()'s own internal 30s bound stands in for
+        // ../../WORKLOAD.md's "60s, generous" - plenty for this workload's
+        // bounded overload (worst case a few seconds of backlog).
+        boolean drained = bus.gracefulShutdown();
+        long drainTailMs = (System.nanoTime() - drainStart) / 1_000_000L;
+
+        long deliveredCount = Math.min(count.get(), latencies.length);
+        long publishedCount = published.get();
+        double elapsedS = windowElapsedNs / 1e9;
+
+        return new CapResult(config, producers, concurrency, 1, CAP_CAPACITY, loadFraction, targetRateEpsTotal,
+                (int) publishedCount, deliveredCount, windowElapsedNs / 1_000_000, publishedCount / elapsedS,
+                endOfWindowDepth, drainTailMs,
+                computeLatencyStats(Arrays.copyOf(latencies, (int) deliveredCount)), drained);
+    }
+
     public static void main(String[] args) throws Exception {
         int cores = Runtime.getRuntime().availableProcessors();
         int par = Math.max(1, Math.min(8, cores));
@@ -215,5 +359,34 @@ public class Bench {
         for (int trial = 1; trial <= TRIALS; trial++) print(runShared("seq", 1), trial);
         for (int trial = 1; trial <= TRIALS; trial++) print(runShared("par", par), trial);
         for (int trial = 1; trial <= TRIALS; trial++) print(runIndependentChannels(par), trial);
+
+        for (String config : new String[]{"cap1", "cap8"}) {
+            int producers = config.equals("cap1") ? 1 : par;
+
+            double maxThroughput = 0;
+            // Fixed, generous calibration pool - independent of the
+            // target-rate-based sweep formula below, since calibration is
+            // exactly what measures that rate. Comfortably covers this
+            // port's achievable throughput over CALIBRATION_DURATION_MS.
+            int calibrationPoolPerProducer = Math.max(2_000, 600_000 / producers);
+            for (int trial = 1; trial <= CALIBRATION_TRIALS; trial++) {
+                CapResult r = runCapacityWindow(config, producers, producers, CALIBRATION_DURATION_MS, 0, 0,
+                        calibrationPoolPerProducer);
+                printCap(r, trial);
+                maxThroughput = Math.max(maxThroughput, r.throughputEps());
+            }
+
+            for (double loadFraction : LOAD_FRACTIONS) {
+                double targetRateEpsTotal = maxThroughput * loadFraction;
+                double targetRatePerProducer = targetRateEpsTotal / producers;
+                int poolPerProducer = (int) Math.ceil(targetRatePerProducer * (SWEEP_DURATION_MS / 1000.0) * 1.5);
+                poolPerProducer = Math.min(poolPerProducer, MAX_SWEEP_POOL_TOTAL / producers);
+                for (int trial = 1; trial <= SWEEP_TRIALS; trial++) {
+                    CapResult r = runCapacityWindow(config, producers, producers, SWEEP_DURATION_MS,
+                            targetRateEpsTotal, loadFraction, poolPerProducer);
+                    printCap(r, trial);
+                }
+            }
+        }
     }
 }

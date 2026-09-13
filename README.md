@@ -6,7 +6,7 @@
 
 `seda-bus` — a small, broker-less, staged message bus — exists in seven
 language ports: Java, Rust, Python, TypeScript, C++, C#, and Go, all built
-from [one shared design](../DESIGN.md). This repo compares them: the same
+from [one shared design](https://github.com/resolvingarchitecture/seda-bus-design). This repo compares them: the same
 benchmark workload, run identically in all seven, plus a table of the
 structural differences already documented per-port (worker pool model,
 dependencies, envelope source, and more).

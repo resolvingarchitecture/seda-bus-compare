@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -17,6 +18,38 @@ import (
 
 const total = 200_000
 const trials = 3
+
+// Capacity-curve constants - see ../WORKLOAD.md's "The capacity curve"
+// section for the full protocol these implement.
+const capacityCurveCapacity = 1024
+const capacityCurveTimeout = 30 * time.Second
+const calibrationDuration = 2 * time.Second
+const calibrationTrials = 2
+
+// Generous upper bound for a calibrationDuration firehose burst under a
+// real (if larger-than-sweep) capacity; if a producer somehow exhausts its
+// share, it just stops early rather than allocating mid-window.
+const calibrationPoolTotal = 1_000_000
+const sweepDuration = 4 * time.Second
+const sweepTrials = 2
+const tick = 20 * time.Millisecond
+
+// Hard ceiling on the TOTAL pre-built envelope pool for one sweep trial,
+// across all its producers combined. The formula in ../WORKLOAD.md
+// (target_rate_per_producer * duration * 1.5) grows unboundedly with
+// target_rate_eps - harmless for a slow implementation, but for a fast one
+// at 1.5x load with 8 producers it asks for millions of full Envelope
+// structs *per producer*, multiplied by 8 - measured climbing past 3.5GB
+// RSS and still rising before this cap was tightened from a (still too
+// generous) per-producer-only cap. A per-producer cap alone doesn't bound
+// the real cost, which is the sum across all of a trial's producers.
+// Capping trades a shorter-than-4s effective sweep window for configs fast
+// enough to exhaust it (the loop already stops early on pool exhaustion)
+// against never crashing the run - a real limitation, documented rather
+// than hidden: see any trial whose elapsed_ms is well under 4000.
+const maxSweepPoolTotal = 400_000
+
+var loadFractions = []float64{0.5, 1.0, 1.5}
 
 // Pre-building `total` envelopes is itself a burst of allocation right
 // before the timed window starts; without a settle pause + explicit GC, a
@@ -63,6 +96,14 @@ type result struct {
 	P999Us        float64 `json:"p999_us"`
 	MaxUs         float64 `json:"max_us"`
 	Drained       bool    `json:"drained"`
+
+	// Capacity-curve only (cap1/cap8) - zero-valued and present for
+	// seq/par/chan rows, per ../WORKLOAD.md's output contract.
+	Capacity         int     `json:"capacity"`
+	LoadFraction     float64 `json:"load_fraction"`
+	TargetRateEPS    float64 `json:"target_rate_eps"`
+	EndOfWindowDepth int     `json:"end_of_window_depth"`
+	DrainTailMs      int64   `json:"drain_tail_ms"`
 }
 
 // runShared: producers threads, all publishing to ONE channel with
@@ -211,6 +252,209 @@ func runIndependentChannels(producers int) result {
 	}
 }
 
+// capChannelState is the per-run harness state for a capacity-curve
+// "bench" channel: a delivered counter plus every delivered envelope's
+// latency, appended under a mutex (rare relative to Publish's own
+// concurrency - this channel's own contention isn't what's under test).
+type capChannelState struct {
+	mu        sync.Mutex
+	latencies []float64
+	delivered atomic.Int64
+}
+
+// newCapacityCurveBus builds a fresh bus + "bench" channel with a real,
+// fixed capacity and Block backpressure - see ../WORKLOAD.md's "The
+// capacity curve" section. A fresh bus per trial, not a shared/reset one,
+// per the spec.
+func newCapacityCurveBus(producers int) (*sedabus.Bus, *capChannelState) {
+	bus := sedabus.NewBus(producers)
+	st := &capChannelState{latencies: make([]float64, 0, 4096)}
+	bus.Channel("bench", sedabus.NewChannelConfig().
+		WithCapacity(capacityCurveCapacity).
+		WithConcurrency(producers).
+		WithBackpressure(sedabus.Block))
+	bus.Subscribe("bench", func(env *sedabus.Envelope) bool {
+		t1 := nowNanos()
+		t0 := sedabus.EnvelopePayload(env).(int64)
+		st.mu.Lock()
+		st.latencies = append(st.latencies, float64(t1-t0)/1000.0)
+		st.mu.Unlock()
+		st.delivered.Add(1)
+		return true
+	})
+	return bus, st
+}
+
+// buildEnvelopePool pre-builds n envelopes for one producer - construction
+// must never fall inside a timed window. See ../WORKLOAD.md.
+func buildEnvelopePool(n int) []*sedabus.Envelope {
+	envs := make([]*sedabus.Envelope, n)
+	for i := range envs {
+		envs[i] = sedabus.MakeEnvelope("bench", int64(0))
+	}
+	return envs
+}
+
+// calibrateCapacityCurve is Step 1 of ../WORKLOAD.md's capacity curve:
+// measure this specific stage's own sustained throughput under a real,
+// bounded, Block-backpressured queue - "100%" for the sweep below. Returns
+// the max of calibrationTrials runs (a conservative, achievable ceiling,
+// not an average) plus the emitted rows for both runs.
+func calibrateCapacityCurve(config string, producers int) (float64, []result) {
+	rows := make([]result, 0, calibrationTrials)
+	maxEPS := 0.0
+	timeoutDur := capacityCurveTimeout
+
+	for trial := 1; trial <= calibrationTrials; trial++ {
+		bus, st := newCapacityCurveBus(producers)
+
+		perProducer := calibrationPoolTotal / producers
+		pools := make([][]*sedabus.Envelope, producers)
+		for p := 0; p < producers; p++ {
+			pools[p] = buildEnvelopePool(perProducer)
+		}
+
+		runtime.GC()
+		time.Sleep(settle)
+		start := time.Now()
+		deadline := start.Add(calibrationDuration)
+		var wg sync.WaitGroup
+		var published atomic.Int64
+		for p := 0; p < producers; p++ {
+			wg.Add(1)
+			go func(envs []*sedabus.Envelope) {
+				defer wg.Done()
+				for _, env := range envs {
+					if time.Now().After(deadline) {
+						return
+					}
+					sedabus.SetPayload(env, nowNanos())
+					bus.Publish(env, &timeoutDur)
+					published.Add(1)
+				}
+			}(pools[p])
+		}
+		wg.Wait()
+		windowElapsed := time.Since(start)
+		endDepth := bus.GetStats()["bench"].Depth
+		drainStart := time.Now()
+		drained := bus.Shutdown(60 * time.Second)
+		drainTail := time.Since(drainStart)
+
+		stats := computeLatencyStats(st.latencies)
+		eps := float64(published.Load()) / windowElapsed.Seconds()
+		if eps > maxEPS {
+			maxEPS = eps
+		}
+
+		rows = append(rows, result{
+			Language: "go", Config: config, Trial: trial, Producers: producers,
+			Concurrency: producers, Channels: 1, Capacity: capacityCurveCapacity,
+			LoadFraction: 0, TargetRateEPS: 0,
+			Total: int(published.Load()), Delivered: st.delivered.Load(),
+			ElapsedMs: windowElapsed.Milliseconds(), ThroughputEPS: eps,
+			EndOfWindowDepth: endDepth, DrainTailMs: drainTail.Milliseconds(),
+			P50Us: stats.P50Us, P99Us: stats.P99Us, P999Us: stats.P999Us, MaxUs: stats.MaxUs,
+			Drained: drained,
+		})
+	}
+	return maxEPS, rows
+}
+
+// sweepCapacityCurve is Step 2 of ../WORKLOAD.md's capacity curve: pace
+// publishing at target_rate_eps (maxThroughputEPS * loadFraction) for
+// sweepDuration via a tick-based rate limiter, then drain, recording how
+// the stage behaved relative to that target.
+func sweepCapacityCurve(config string, producers int, loadFraction float64, maxThroughputEPS float64, trial int) result {
+	targetRateEPS := maxThroughputEPS * loadFraction
+	targetPerProducer := targetRateEPS / float64(producers)
+	timeoutDur := capacityCurveTimeout
+
+	bus, st := newCapacityCurveBus(producers)
+
+	poolSize := int(math.Ceil(targetPerProducer * sweepDuration.Seconds() * 1.5))
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	if maxPerProducer := maxSweepPoolTotal / producers; poolSize > maxPerProducer {
+		poolSize = maxPerProducer
+	}
+	pools := make([][]*sedabus.Envelope, producers)
+	for p := 0; p < producers; p++ {
+		pools[p] = buildEnvelopePool(poolSize)
+	}
+
+	perTick := int(math.Round(targetPerProducer * tick.Seconds()))
+	if perTick < 1 {
+		perTick = 1
+	}
+
+	runtime.GC()
+	time.Sleep(settle)
+	start := time.Now()
+	deadline := start.Add(sweepDuration)
+	var wg sync.WaitGroup
+	var published atomic.Int64
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func(envs []*sedabus.Envelope) {
+			defer wg.Done()
+			idx := 0
+			for time.Now().Before(deadline) && idx < len(envs) {
+				tickStart := time.Now()
+				for i := 0; i < perTick && idx < len(envs) && time.Now().Before(deadline); i++ {
+					env := envs[idx]
+					idx++
+					sedabus.SetPayload(env, nowNanos())
+					bus.Publish(env, &timeoutDur)
+					published.Add(1)
+				}
+				tickElapsed := time.Since(tickStart)
+				if tickElapsed < tick {
+					time.Sleep(tick - tickElapsed)
+				}
+				// else: don't sleep - the channel's Block wait is already
+				// the bottleneck, and achieved rate falling below target
+				// is exactly the signal this benchmark exists to show.
+			}
+		}(pools[p])
+	}
+	wg.Wait()
+	windowElapsed := time.Since(start)
+	endDepth := bus.GetStats()["bench"].Depth
+	drainStart := time.Now()
+	drained := bus.Shutdown(60 * time.Second)
+	drainTail := time.Since(drainStart)
+
+	stats := computeLatencyStats(st.latencies)
+
+	return result{
+		Language: "go", Config: config, Trial: trial, Producers: producers,
+		Concurrency: producers, Channels: 1, Capacity: capacityCurveCapacity,
+		LoadFraction: loadFraction, TargetRateEPS: targetRateEPS,
+		Total: int(published.Load()), Delivered: st.delivered.Load(),
+		ElapsedMs:        windowElapsed.Milliseconds(),
+		ThroughputEPS:    float64(published.Load()) / windowElapsed.Seconds(),
+		EndOfWindowDepth: endDepth, DrainTailMs: drainTail.Milliseconds(),
+		P50Us: stats.P50Us, P99Us: stats.P99Us, P999Us: stats.P999Us, MaxUs: stats.MaxUs,
+		Drained: drained,
+	}
+}
+
+// runCapacityCurve implements the full protocol in ../WORKLOAD.md's "The
+// capacity curve" section for one producer-count configuration ("cap1" or
+// "cap8"): calibrate this stage's own sustained throughput, then sweep
+// load fractions relative to it.
+func runCapacityCurve(config string, producers int) []result {
+	maxEPS, rows := calibrateCapacityCurve(config, producers)
+	for _, lf := range loadFractions {
+		for trial := 1; trial <= sweepTrials; trial++ {
+			rows = append(rows, sweepCapacityCurve(config, producers, lf, maxEPS, trial))
+		}
+	}
+	return rows
+}
+
 func main() {
 	par := runtime.NumCPU()
 	if par > 8 {
@@ -240,6 +484,13 @@ func main() {
 	for trial := 1; trial <= trials; trial++ {
 		r := runIndependentChannels(par)
 		r.Trial = trial
+		emit(r)
+	}
+
+	for _, r := range runCapacityCurve("cap1", 1) {
+		emit(r)
+	}
+	for _, r := range runCapacityCurve("cap8", par) {
 		emit(r)
 	}
 }

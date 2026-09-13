@@ -5,7 +5,7 @@
 // tsx needed to *run* this, only to have built seda-bus-ts/ra-common-ts
 // beforehand (`npm run build` in each, already done by the Dockerfile).
 import os from "node:os";
-import { SedaBus, makeEnvelope } from "../../../seda-bus-ts/dist/index.js";
+import { SedaBus, Backpressure, makeEnvelope } from "../../../seda-bus-ts/dist/index.js";
 import { envelopePayload } from "../../../seda-bus-ts/dist/envelope.js";
 
 const TOTAL = 200_000;
@@ -20,6 +20,34 @@ const TRIALS = 3;
 // settle delay only, not an explicit collection. See ../WORKLOAD.md.
 const SETTLE_MS = 200;
 const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// -- capacity curve (see ../WORKLOAD.md's "The capacity curve") ----------
+const CAP_CAPACITY = 1024;
+const CALIBRATION_MS = 2000;
+const CALIBRATION_TRIALS = 2;
+// The spec's pool-sizing formula (target_rate * duration * 1.5) only
+// covers the paced sweep, which needs a known target rate. Calibration
+// (Step 1) is deliberately unpaced/unbounded - its whole point is
+// measuring a rate we don't know yet - so its own pool size is a
+// generous fixed guess instead: comfortably above any realistic
+// bounded-capacity (1024), Block-backpressured single-channel throughput
+// this event-loop-based port could sustain (this report's own prior
+// firehose numbers for `par`/`chan` topped out in the low hundreds of
+// thousands eps on an *unbounded* queue - this is bounded, so lower still).
+const CALIBRATION_POOL_PER_PRODUCER = 400_000;
+const SWEEP_MS = 4000;
+const SWEEP_TRIALS = 2;
+const LOAD_FRACTIONS = [0.5, 1.0, 1.5];
+const TICK_MS = 20;
+const CAP_PUBLISH_TIMEOUT_MS = 30_000;
+// Hard ceiling on one sweep trial's TOTAL pre-built pool, across all its
+// producers combined - the rate-derived formula below grows unboundedly
+// with target_rate_eps, which for a fast config at high load and several
+// producers can ask for millions of envelopes per producer (an uncapped
+// version of this same formula OOM-killed seda-bus-go's equivalent
+// benchmark outright; capped here before ever running it).
+const MAX_SWEEP_POOL_TOTAL = 400_000;
 
 // nowUs: performance.now() has an arbitrary per-process origin (process
 // start) - only ever diffed within this process. Already in fractional
@@ -178,6 +206,138 @@ async function runIndependentChannels(producers) {
   };
 }
 
+// Tick-based rate limiter for one producer: publishes up to `perTick`
+// envelopes back-to-back each tick, then sleeps the tick's remainder - or
+// doesn't, if publishing already took the whole tick (Block backpressure
+// is the bottleneck), which is exactly the signal this benchmark exists to
+// show. targetPerProducerEps <= 0 means unpaced (calibration): publish as
+// fast as possible until the pool or the deadline is exhausted.
+async function paceProducer(bus, envs, targetPerProducerEps, tickMs, windowDeadline) {
+  let i = 0;
+  const tickSeconds = tickMs / 1000;
+  const perTick = targetPerProducerEps > 0 ? Math.max(1, Math.round(targetPerProducerEps * tickSeconds)) : envs.length;
+  while (performance.now() < windowDeadline && i < envs.length) {
+    const tickStart = performance.now();
+    const tickEnd = Math.min(i + perTick, envs.length);
+    while (i < tickEnd && performance.now() < windowDeadline) {
+      const env = envs[i++];
+      env.addContent(nowUs());
+      await bus.publish(env, { timeoutMs: CAP_PUBLISH_TIMEOUT_MS });
+    }
+    if (targetPerProducerEps > 0) {
+      const tickElapsed = performance.now() - tickStart;
+      if (tickElapsed < tickMs) await sleep(tickMs - tickElapsed);
+    }
+  }
+  return i;
+}
+
+// One capacity-curve trial: `producers` concurrent tasks on ONE `bench`
+// channel, capacity=1024, Block backpressure, concurrency=producers.
+async function runCapacityTrial({ config, producers, loadFraction, targetRateEps, durationMs, poolPerProducer }) {
+  const bus = new SedaBus({ concurrency: producers });
+  let count = 0;
+  const latencies = [];
+  bus.channel("bench", { capacity: CAP_CAPACITY, concurrency: producers, backpressure: Backpressure.Block });
+  bus.subscribe("bench", (env) => {
+    const t1 = nowUs();
+    const t0 = envelopePayload(env);
+    latencies.push(t1 - t0);
+    count++;
+    return true;
+  });
+
+  const targetPerProducer = targetRateEps > 0 ? targetRateEps / producers : 0;
+
+  // Pre-build every producer's envelope pool before the timed window
+  // starts - construction stays out of scope, same as the firehose
+  // configs. See ../WORKLOAD.md's capacity-curve Step 2 for the sweep's
+  // pool-sizing formula; calibration's own pool size is a fixed constant
+  // (see CALIBRATION_POOL_PER_PRODUCER's comment above).
+  const perProducerEnvelopes = [];
+  for (let p = 0; p < producers; p++) {
+    const envs = [];
+    for (let i = 0; i < poolPerProducer; i++) envs.push(makeEnvelope("bench", 0));
+    perProducerEnvelopes.push(envs);
+  }
+
+  await settle();
+  const start = performance.now();
+  const windowDeadline = start + durationMs;
+  const publishedCounts = await Promise.all(
+    perProducerEnvelopes.map((envs) => paceProducer(bus, envs, targetPerProducer, TICK_MS, windowDeadline)),
+  );
+  const published = publishedCounts.reduce((a, b) => a + b, 0);
+  const elapsedMs = performance.now() - start;
+
+  const endOfWindowDepth = bus.stats()["bench"].depth;
+
+  const drainStart = performance.now();
+  const drained = await bus.shutdown({ timeoutMs: 60_000 });
+  const drainTailMs = performance.now() - drainStart;
+
+  return {
+    language: "ts",
+    config,
+    trial: 0,
+    producers,
+    concurrency: producers,
+    channels: 1,
+    capacity: CAP_CAPACITY,
+    load_fraction: loadFraction,
+    target_rate_eps: Math.round(targetRateEps),
+    total: published,
+    delivered: count,
+    elapsed_ms: Math.round(elapsedMs),
+    throughput_eps: published / (elapsedMs / 1000),
+    end_of_window_depth: endOfWindowDepth,
+    drain_tail_ms: Math.round(drainTailMs),
+    ...computeLatencyStats(latencies),
+    drained,
+  };
+}
+
+// Step 1 (calibrate) + Step 2 (sweep [0.5, 1.0, 1.5]) for one producer-count
+// configuration ("cap1" or "cap8"). Emits every row itself (calibration
+// rows carry load_fraction: 0).
+async function runCapacityCurve(configName, producers) {
+  let maxThroughputEps = 0;
+  for (let trial = 1; trial <= CALIBRATION_TRIALS; trial++) {
+    const r = await runCapacityTrial({
+      config: configName,
+      producers,
+      loadFraction: 0,
+      targetRateEps: 0,
+      durationMs: CALIBRATION_MS,
+      poolPerProducer: CALIBRATION_POOL_PER_PRODUCER,
+    });
+    r.trial = trial;
+    console.log(JSON.stringify(r));
+    if (r.throughput_eps > maxThroughputEps) maxThroughputEps = r.throughput_eps;
+  }
+
+  for (const loadFraction of LOAD_FRACTIONS) {
+    const targetRateEps = maxThroughputEps * loadFraction;
+    const targetPerProducer = targetRateEps / producers;
+    const poolPerProducer = Math.min(
+      Math.ceil(targetPerProducer * (SWEEP_MS / 1000) * 1.5),
+      Math.floor(MAX_SWEEP_POOL_TOTAL / producers),
+    );
+    for (let trial = 1; trial <= SWEEP_TRIALS; trial++) {
+      const r = await runCapacityTrial({
+        config: configName,
+        producers,
+        loadFraction,
+        targetRateEps,
+        durationMs: SWEEP_MS,
+        poolPerProducer,
+      });
+      r.trial = trial;
+      console.log(JSON.stringify(r));
+    }
+  }
+}
+
 async function main() {
   const cores = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
   const par = Math.max(1, Math.min(8, cores));
@@ -197,6 +357,9 @@ async function main() {
     r.trial = trial;
     console.log(JSON.stringify(r));
   }
+
+  await runCapacityCurve("cap1", 1);
+  await runCapacityCurve("cap8", par);
 }
 
 main();
