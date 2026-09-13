@@ -65,6 +65,15 @@ day's run.
   distinct from the firehose configs' unbounded-queue number.
 - Fully drain and reset all counters (a fresh channel/bus instance is
   simplest) before moving to Step 2.
+- **Pool sizing here has no target rate to derive from** (that's the whole
+  point of calibrating), so use a fixed, generous guess instead — but size
+  it as a TOTAL budget divided across this window's producers
+  (`max(2000, total_budget / producers)`), not a flat per-producer
+  constant. A flat constant sized for `cap1` (1 producer) becomes 8x too
+  large for `cap8` (8 producers) and asks for the same unbounded-with-
+  producer-count memory a naive sweep formula does (see Step 2's own
+  pool-sizing note) - this OOM-crashed one implementation outright before
+  being caught and fixed here.
 
 ### Step 2 — sweep the load
 

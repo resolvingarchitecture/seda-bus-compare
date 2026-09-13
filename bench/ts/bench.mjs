@@ -309,7 +309,14 @@ async function runCapacityCurve(configName, producers) {
       loadFraction: 0,
       targetRateEps: 0,
       durationMs: CALIBRATION_MS,
-      poolPerProducer: CALIBRATION_POOL_PER_PRODUCER,
+      // CALIBRATION_POOL_PER_PRODUCER is sized for producers=1 (cap1); for
+      // cap8 the same flat constant per producer means 8x the total
+      // allocation, which OOM-crashed Node outright (V8's heap limit is
+      // much tighter than a native process's default) - divide by
+      // producers so the TOTAL across a trial's producers stays bounded,
+      // matching every other language's already-producer-count-aware
+      // calibration sizing.
+      poolPerProducer: Math.max(2000, Math.floor(CALIBRATION_POOL_PER_PRODUCER / producers)),
     });
     r.trial = trial;
     console.log(JSON.stringify(r));

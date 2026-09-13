@@ -205,7 +205,16 @@ def run_capacity_curve(config: str, producers: int) -> list[dict]:
     rows = []
 
     calib_results = []
-    calib_pool = [CALIBRATION_POOL_PER_PRODUCER] * producers
+    # CALIBRATION_POOL_PER_PRODUCER is sized for producers=1 (cap1); for
+    # cap8 the same flat constant per producer means 8x the total
+    # allocation - divide by producers so the TOTAL across a trial's
+    # producers stays bounded, matching every other language's
+    # already-producer-count-aware calibration sizing (this hasn't crashed
+    # Python yet, only found and fixed after it crashed Node's much
+    # tighter default heap limit for the identical flat-constant pattern,
+    # but the same unbounded-with-producer-count risk applies here too).
+    calib_pool_per_producer = max(2_000, CALIBRATION_POOL_PER_PRODUCER // producers)
+    calib_pool = [calib_pool_per_producer] * producers
     for trial in range(1, CALIBRATION_TRIALS + 1):
         r = _run_timed_window(producers, CALIBRATION_DURATION_S, calib_pool, per_tick=None)
         calib_results.append(r)
