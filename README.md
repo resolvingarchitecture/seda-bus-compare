@@ -20,78 +20,104 @@ dependencies, envelope source, and more).
 ## Results at a glance
 
 Full narrative in [`RESULTS.md`](RESULTS.md); read
-[`METHODOLOGY.md`](METHODOLOGY.md) first — this report has been
-substantially corrected twice by direct, specific pushback (a contaminated
-host, then envelope construction cost silently folded into every "bus
-overhead" number), and this pass went further and fixed four real bugs in
-the libraries it measures (Go, Rust — two separate fixes, C++ — see "What
-this found" below), so these are directional, not authoritative. `seq` = 1 producer/1 channel;
-`par` = 8 producers sharing 1 channel (lock contention); `chan` = 8
-producers, 8 independent channels (real parallel capacity). 200,000
-envelopes/trial, 3 trials/config, envelope construction excluded from the
-timed window, all numbers envelopes/sec.
+[`METHODOLOGY.md`](METHODOLOGY.md) first. Two benchmarks: **the capacity
+curve** is primary — a real bounded queue (capacity 1024), real `Block`
+backpressure, swept load at 0.5x/1.0x/1.5x each implementation's own
+measured sustained throughput. **The firehose configs** (`seq`/`par`/
+`chan`, below) are secondary and diagnostic — capacity large enough that
+backpressure never engages, useful for finding lock-contention bugs, not
+for capacity planning.
+
+### Capacity curve
+
+Each stage's own measured sustained throughput under real backpressure
+(`cap1`: 1 producer; `cap8`: up to 8 producers sharing one channel):
+
+| Implementation | `cap1` sustained eps | `cap8` sustained eps |
+|---|--:|--:|
+| Rust | 679,363 | 456,160 |
+| Java | 648,341 | 444,318 |
+| Go | 179,706 | 399,558 |
+| C# | 239,952 | 340,295 |
+| TypeScript | 203,898 | 219,670 |
+| C++ | 179,119 | 90,980 |
+| Python 3.14t (free-threaded) | 100,868 | 25,366 |
+| Python 3.13 (GIL) | 41,126 | 16,648 |
+
+![Capacity curve: achieved/target rate and p50 latency by load fraction](results/charts/capacity_curve.svg)
+
+At paced load, every implementation tracks its own target closely at
+0.5x-1.0x and, as it must, falls short at the deliberate 1.5x-overload
+point — the story worth reading is in the shape of that fall (a graceful
+latency increase vs. a cliff) and in C++'s `cap8` sustained throughput
+being *lower* than its own `cap1` (two-lock-queue contention under 8-way
+concurrency, visible here in a way the firehose config doesn't fully
+expose) and C#'s consistently high tail latency at every load level, not
+growing with load — see `RESULTS.md`'s "The capacity curve" section for
+the full table and per-language detail.
+
+### Firehose configs (secondary)
+
+`seq` = 1 producer/1 channel; `par` = 8 producers sharing 1 channel (lock
+contention); `chan` = 8 producers, 8 independent channels (real parallel
+capacity). 200,000 envelopes/trial, 3 trials/config, envelope construction
+excluded from the timed window, all numbers envelopes/sec.
 
 | Implementation                | seq     | par     | par vs. seq |          chan | chan vs. seq |
 |--------------------------------|--------:|--------:|------------:|--------------:|-------------:|
-| Java                           | 970,273 | 505,126 |       0.52x | **1,973,541** |        2.03x |
-| Go                             | 370,802 | 392,855 |       1.06x |     1,543,265 |        4.16x |
-| Rust                           | 576,594 | **709,629** |   **1.23x** |       729,021 |        1.26x |
-| C#                             | 273,883 | 272,370 |       0.99x |       396,465 |        1.45x |
-| C++                            | 323,133 | 259,425 |       0.80x |       386,556 |        1.20x |
-| Python 3.14t (free-threaded)   | 102,589 |  45,178 |       0.44x |       274,172 |        2.67x |
-| TypeScript (Node 22)           |  21,547 |  14,457 |       0.67x |       128,621 |    **5.97x** |
-| Python 3.13 (GIL)              |  48,206 |  30,131 |       0.63x |        35,502 |    **0.74x** |
+| Java                           | 795,225 | 450,484 |       0.57x | **2,028,409** |        2.55x |
+| Go                             | 409,220 | 368,838 |       0.90x |     1,517,294 |        3.71x |
+| Rust                           | 606,442 | **727,257** |   **1.20x** |       725,894 |        1.20x |
+| C#                             | 280,944 | **421,688** |   **1.50x** |       497,239 |        1.77x |
+| C++                            | 333,154 | 264,553 |       0.79x |       396,987 |        1.19x |
+| Python 3.14t (free-threaded)   | 104,602 |  45,263 |       0.43x |       270,904 |        2.59x |
+| TypeScript (Node 22)           |  22,035 |  14,798 |       0.67x |       129,225 |    **5.86x** |
+| Python 3.13 (GIL)              |  51,649 |  28,417 |       0.55x |        35,285 |    **0.68x** |
 
 ![Throughput by implementation and configuration (log scale)](results/charts/throughput.svg)
 
-Rust moved the most here, and not from a methodology change — from a real
-fix: `Channel`'s single data-queue mutex (shared by every producer *and*
-consumer on a stage) was replaced with `crossbeam-queue`'s lock-free
-`ArrayQueue`, taking `par` from 427,650 to 709,629 eps (+66%) — `par` now
-*beats* `seq` (1.23x) and nearly matches `chan`. C++ also moved
-substantially, from its own real fix: `Channel`'s single mutex was
-replaced with a two-lock ring-buffer queue, nearly doubling `seq` and more
-than tripling `par`. C++'s `par` is no longer this report's worst collapse
-(0.80x now, was 0.39x). See "What this found" below.
+Rust's and C#'s `par` both beat their own `seq` now (1.20x and 1.50x —
+the best `par`-vs-`seq` ratio in this table) — both replaced a single
+shared-mutex `Channel` data queue with a lock-free structure (Rust:
+`crossbeam-queue`'s `ArrayQueue`; C#: two `ConcurrentQueue` lanes), the
+same class of fix C++ applied earlier (a two-lock ring-buffer queue,
+`par` no longer this report's worst collapse). See "What this found"
+below.
 
-Latency (`p50`/`p99`/`p999`/`max`, microseconds) tells a different story —
-it's queueing delay under a producer/consumer rate mismatch, not raw
-dispatch cost (`bench/WORKLOAD.md` explains why). **This pass's central
-finding: once producers aren't artificially throttled by construction
-cost, several "compiled, natively-multithreaded" implementations show a
-real, sustained backlog, including in `chan`** — the configuration this
-report previously held up as having no artificial contention point left to
-hide behind. That overturns this report's own earlier claim that compiled
-languages never show this pattern. See `RESULTS.md`'s "Latency" section for
-the full clean/tail-stall/backlog classification, table, and per-language
-detail — it's long, and worth reading in full rather than summarized here.
+Latency (`p50`/`p99`/`p999`/`max`, microseconds) is queueing delay under
+a producer/consumer rate mismatch, not raw dispatch cost (`bench/
+WORKLOAD.md` explains why) — several "compiled, natively-multithreaded"
+implementations show a real, sustained backlog here, including in `chan`,
+once producers aren't artificially throttled by construction cost. See
+`RESULTS.md`'s "Latency" section for the full clean/tail-stall/backlog
+classification, table, and per-language detail.
 
 | Implementation    | Config |         p50 (us) |       p99 (us) |      p999 (us) |       max (us) |
 |-------------------|--------|------------------:|----------------:|----------------:|----------------:|
-| Java               | seq    |          16,311.5 |         19,314.4 |         19,424.5 |         29,395.8 |
-| Java               | par    |             667.6 |          4,331.2 |          4,758.3 |          6,559.8 |
-| Java               | chan   |          12,991.6 |         30,192.6 |         31,473.7 |         35,382.4 |
-| Go                 | seq    |         248,313.4 |        303,660.6 |        304,835.6 |        359,600.8 |
-| Go                 | par    |          64,284.0 |        101,024.2 |        101,345.2 |        123,354.5 |
-| Go                 | chan   |          49,053.6 |         82,153.3 |         86,180.8 |         91,737.4 |
-| Rust               | seq    |           5,473.7 |         10,047.8 |         10,216.1 |         26,303.1 |
-| Rust               | par    |          95,678.8 |        163,316.4 |        163,988.2 |        170,084.2 |
-| Rust               | chan   |          89,832.5 |        179,564.3 |        186,023.2 |        198,074.0 |
-| C#                 | seq    |         211,531.6 |        306,045.4 |        306,326.0 |        462,126.0 |
-| C#                 | par    |              18.2 |         22,400.8 |         51,804.2 |         78,553.8 |
-| C#                 | chan   |           3,701.5 |        206,094.4 |        218,437.2 |        234,820.4 |
-| C++                | seq    |           6,321.4 |         14,691.9 |         15,253.9 |         39,798.2 |
-| C++                | par    |           9,714.6 |        146,138.6 |        148,557.4 |        205,465.0 |
-| C++                | chan   |          78,511.3 |        368,954.9 |        372,643.4 |        383,369.1 |
-| Python 3.14t       | seq    |         326,637.3 |        447,365.4 |        449,672.5 |        473,971.0 |
-| Python 3.14t       | par    |       1,154,405.5 |      1,619,838.3 |      1,624,483.7 |      1,684,543.7 |
-| Python 3.14t       | chan   |         207,261.3 |        339,872.4 |        342,219.7 |        373,012.9 |
-| TypeScript         | seq    |       4,433,258.8 |      6,238,324.6 |      6,243,100.2 |      6,289,775.2 |
-| TypeScript         | par    |       6,660,340.8 |      9,558,982.3 |      9,567,778.4 |      9,603,268.9 |
-| TypeScript         | chan   |         595,209.5 |      1,015,910.0 |      1,017,284.6 |      1,038,776.2 |
-| Python 3.13 (GIL)  | seq    |         555,618.0 |        990,808.0 |        999,983.9 |      1,139,307.1 |
-| Python 3.13 (GIL)  | par    |       2,775,020.5 |      3,656,896.5 |      3,676,550.4 |      3,969,731.3 |
-| Python 3.13 (GIL)  | chan   |       2,876,805.7 |      4,472,102.1 |      4,587,300.0 |      5,001,011.7 |
+| Java               | seq    |              24.7 |          3,511.2 |          3,862.5 |         29,356.2 |
+| Java               | par    |             395.3 |          3,302.7 |          3,595.9 |          5,431.1 |
+| Java               | chan   |          12,218.1 |         30,809.3 |         31,718.2 |         54,969.5 |
+| Go                 | seq    |         202,909.0 |        283,866.0 |        284,528.2 |        324,208.6 |
+| Go                 | par    |          61,375.2 |         96,719.1 |         97,144.9 |        117,794.5 |
+| Go                 | chan   |          48,450.2 |         83,207.3 |         85,479.8 |         91,513.1 |
+| Rust               | seq    |           9,450.3 |         11,338.6 |         11,496.7 |         56,689.6 |
+| Rust               | par    |          93,125.7 |        161,851.3 |        162,625.6 |        163,702.1 |
+| Rust               | chan   |         100,439.8 |        187,370.0 |        188,353.4 |        194,831.3 |
+| C#                 | seq    |         211,067.7 |        339,757.4 |        340,372.7 |        454,541.2 |
+| C#                 | par    |           3,945.2 |         82,015.9 |         95,806.7 |        116,063.0 |
+| C#                 | chan   |          30,053.8 |        160,742.2 |        185,653.0 |        284,885.2 |
+| C++                | seq    |             751.5 |          2,030.2 |          2,334.9 |          5,762.3 |
+| C++                | par    |          14,680.6 |        141,592.0 |        145,229.1 |        207,443.1 |
+| C++                | chan   |          82,814.2 |        365,371.7 |        369,832.4 |        375,301.1 |
+| Python 3.14t       | seq    |         217,867.3 |        341,360.1 |        342,777.1 |        352,758.9 |
+| Python 3.14t       | par    |       1,125,006.2 |      1,605,098.8 |      1,610,192.9 |      1,657,645.2 |
+| Python 3.14t       | chan   |         211,862.4 |        325,257.1 |        327,857.0 |        348,108.4 |
+| TypeScript         | seq    |       4,324,175.5 |      6,121,268.6 |      6,121,988.2 |      6,219,986.0 |
+| TypeScript         | par    |       6,405,910.6 |      9,326,253.7 |      9,328,676.1 |      9,433,549.5 |
+| TypeScript         | chan   |         599,264.8 |      1,012,212.5 |      1,013,109.0 |      1,043,043.0 |
+| Python 3.13 (GIL)  | seq    |         615,576.8 |      1,146,722.5 |      1,156,797.2 |      1,363,498.2 |
+| Python 3.13 (GIL)  | par    |       2,746,611.5 |      3,441,896.7 |      3,467,961.8 |      4,021,970.4 |
+| Python 3.13 (GIL)  | chan   |       2,928,638.7 |      4,698,809.8 |      4,742,205.3 |      5,218,160.9 |
 
 ![Latency (p50/p99/p999/max) by implementation and configuration (log scale)](results/charts/latency.svg)
 
@@ -160,8 +186,8 @@ setup.sh            verifies/clones the sibling repos this depends on
 ## What this found
 
 Building this surfaced three real C++ construction-time bugs, two real
-methodology failures, and — this pass — four real bugs/design issues
-found and **fixed in the actual libraries**, not just measured:
+methodology failures, and five real bugs/design issues found and **fixed
+in the actual libraries**, not just measured:
 
 - **`seda-bus-go` had a genuine lost-wakeup race**: `schedule()` gave up
   silently when it couldn't get a bus-wide permit, with no guarantee
@@ -187,10 +213,23 @@ found and **fixed in the actual libraries**, not just measured:
   tripled. A first attempt (a linked-list two-lock queue) fixed `par` but
   broke `seq`; verified clean under ThreadSanitizer in Docker after the
   fix.
-- **A matching attempt on `seda-bus-cs` made things worse and was
-  reverted** — not shipped as a partial win. See `RESULTS.md`'s "Fixes
-  applied this pass" for the full investigation on all five, including why
-  the C# one didn't work.
+- **`seda-bus-cs`'s single-lock `Channel`** — a first attempt (a
+  hand-rolled two-lock queue) made things worse and was reverted; the
+  design that worked replaced the `LinkedList` + single lock with two
+  lock-free `ConcurrentQueue` lanes instead (retries and fresh admissions
+  drained separately, retries always ahead), avoiding a wait inside a
+  shared .NET `ThreadPool` work item — the likely reason the first
+  attempt regressed. `par` throughput 272,370 → 421,688 eps, now beating
+  `seq` (1.50x, the best ratio in this table).
+
+Each port's own test suite additionally covers backpressure policies,
+retry/dead-letter, consumer-failure isolation, shutdown accounting, config
+validation, and resource lifecycle — see
+[`seda-bus-design/CORRECTNESS_SUITE.md`](https://github.com/resolvingarchitecture/seda-bus-design/blob/master/CORRECTNESS_SUITE.md)
+for the shared checklist and per-port coverage, which found and fixed a
+handful of further real issues (a shutdown-timeout data-loss bug in Rust,
+a zero-capacity hang in C++ and C#, among others) beyond what this
+benchmark alone measures.
 
 Separately, still true from earlier passes: envelope *construction* was
 folded into every "bus overhead" number in this report until a direct,
